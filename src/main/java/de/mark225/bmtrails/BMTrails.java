@@ -26,6 +26,11 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -73,6 +78,8 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private static final String PERM_VISIBLE = "bmtrails.visible";
     private static final String PERM_COLOR_PREFIX = "bmtrails.color.";
     private static final String PERM_CUSTOM_COLOR = "bmtrails.customcolor";
+    private static final DateTimeFormatter SESSION_LABEL_FORMAT = DateTimeFormatter.ofPattern("M/d/yy h:mma", Locale.ROOT)
+            .withZone(ZoneId.systemDefault());
 
     private ConcurrentMap<UUID, ConcurrentLinkedDeque<Vector3d>> currentTrails;
     private ConcurrentMap<UUID, Long> trailLastSeen;
@@ -293,6 +300,12 @@ public final class BMTrails extends JavaPlugin implements Listener {
                 if(!deque.isEmpty() && deque.peekFirst().distance(vector3d) > teleportDetectionThreshold)
                     deque.clear();
 
+                if(!deque.isEmpty() && sameCoordinates(deque.peekFirst(), vector3d)){
+                    session.world = world;
+                    session.lastSeen = System.currentTimeMillis();
+                    continue;
+                }
+
                 deque.addFirst(vector3d);
                 session.points.addFirst(vector3d);
                 session.world = world;
@@ -411,7 +424,13 @@ public final class BMTrails extends JavaPlugin implements Listener {
 
     private String sessionLabel(TrailSession session) {
         String player = nameCache.getOrDefault(session.player, session.player.toString());
-        return player + " session " + new Date(session.startedAt);
+        return player + " " + SESSION_LABEL_FORMAT.format(Instant.ofEpochMilli(session.startedAt));
+    }
+
+    private boolean sameCoordinates(Vector3d first, Vector3d second) {
+        return Double.compare(first.getX(), second.getX()) == 0
+                && Double.compare(first.getY(), second.getY()) == 0
+                && Double.compare(first.getZ(), second.getZ()) == 0;
     }
 
     private void pruneExpiredHistory() {
@@ -461,7 +480,16 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     private List<String> writePoints(Deque<Vector3d> points) {
-        return points.stream().map(point -> point.getX() + "," + point.getY() + "," + point.getZ()).toList();
+        return points.stream()
+                .map(point -> formatCoordinate(point.getX()) + "," + formatCoordinate(point.getY()) + "," + formatCoordinate(point.getZ()))
+                .toList();
+    }
+
+    private String formatCoordinate(double coordinate) {
+        return BigDecimal.valueOf(coordinate)
+                .setScale(3, RoundingMode.HALF_UP)
+                .stripTrailingZeros()
+                .toPlainString();
     }
 
     private void saveTrailHistory() {

@@ -11,11 +11,25 @@ ext {
 
 repositories {
     mavenCentral()
-    maven {
-        name = 'spigotmc-repo'
-        url = 'https://hub.spigotmc.org/nexus/content/groups/public/'
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = 'spigotmc-repo'
+                url = 'https://hub.spigotmc.org/nexus/content/groups/public/'
+            }
+        }
+        filter {
+            includeGroup 'org.spigotmc'
+            includeGroup 'org.bukkit'
+            includeGroup 'net.md-5'
+        }
     }
-    maven { url 'https://jitpack.io' }
+    exclusiveContent {
+        forRepository {
+            maven { url = 'https://jitpack.io' }
+        }
+        filter { includeGroupByRegex "com\\.github\\..*" }
+    }
 }
 
 configurations.configureEach {
@@ -28,7 +42,7 @@ dependencies {
     compileOnly 'com.github.BlueMap-Minecraft:BlueMapAPI:v2.4.0'
 }
 
-def targetJavaVersion = 17
+def targetJavaVersion = 25
 java {
     def javaVersion = JavaVersion.toVersion(targetJavaVersion)
     sourceCompatibility = javaVersion

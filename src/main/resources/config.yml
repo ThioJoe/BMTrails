@@ -24,7 +24,8 @@ persistTrails: true
 historyRetentionDays: 30
 
 # When enabled, every join creates a separate trail marker for that play session instead of merging all retained points into one player trail.
-# These session markers are listed separately in BlueMap's marker UI so they can be shown/hidden independently.
+# With BlueMap versions that support nested marker sets and marker-level toggles, sessions are grouped under each player and can be toggled individually.
+# Older BlueMap versions fall back to listing the session markers in the main marker set.
 separateSessionTrails: false
 
 # Optional manual trail colors for specific players. Keys may be player names or UUIDs; values are rrggbb hex colors.

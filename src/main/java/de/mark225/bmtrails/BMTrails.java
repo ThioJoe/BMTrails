@@ -27,6 +27,8 @@ import org.bukkit.scheduler.BukkitTask;
 import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -115,6 +117,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private boolean persistTrails;
     private int historyRetentionDays;
     private boolean separateSessionTrails;
+    private boolean markerSetVisibleDefault;
+    private boolean markerSetToggleable;
+    private boolean markerToggleOptionsSupported = true;
+    private boolean nestedMarkerSetsSupported = true;
     private File historyFile;
 
 
@@ -185,6 +191,8 @@ public final class BMTrails extends JavaPlugin implements Listener {
         persistTrails = ConfigValue.PERSIST_TRAILS.getValue();
         historyRetentionDays = ConfigValue.HISTORY_RETENTION_DAYS.getValue();
         separateSessionTrails = ConfigValue.SEPARATE_SESSION_TRAILS.getValue();
+        markerSetVisibleDefault = ConfigValue.MARKER_SET_VISIBLE.getValue();
+        markerSetToggleable = ConfigValue.MARKER_SET_TOGGLEABLE.getValue();
         Pattern overridePattern = Pattern.compile("[a-zA-Z0-9]+:[0-9a-fA-F]{6}");
         colorPermissions = ConfigValue.PERMISSION_OVERRIDES.getValue().stream()
                 .filter(str -> overridePattern.matcher(str).matches())
@@ -210,8 +218,8 @@ public final class BMTrails extends JavaPlugin implements Listener {
         List<String> excludedMaps = ConfigValue.EXCLUDED_MAPS.getValue();
         markerSets = new ConcurrentHashMap<>();
         String name = ConfigValue.MARKER_SET_NAME.getValue();
-        boolean visible = ConfigValue.MARKER_SET_VISIBLE.getValue();
-        boolean toggleable = ConfigValue.MARKER_SET_TOGGLEABLE.getValue();
+        boolean visible = markerSetVisibleDefault;
+        boolean toggleable = markerSetToggleable;
         for(World world : Bukkit.getWorlds()){
             BlueMapWorld bmw = blueMapAPI.getWorld(world.getUID()).orElse(null);
             if(bmw == null) continue;
@@ -219,11 +227,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
                     .filter(map -> !excludedMaps.contains(map.getId()))
                     .toList();
             if(maps.isEmpty()) continue;
-            MarkerSet markerSet = MarkerSet.builder()
-                    .label(name)
-                    .defaultHidden(!visible)
-                    .toggleable(toggleable)
-                    .build();
+            MarkerSet markerSet = createMarkerSet(name, visible, toggleable);
             markerSets.put(world.getUID(), markerSet);
             maps.forEach(map -> map.getMarkerSets().put("bmtrails_" + map.getId() + "_" + world.getName(), markerSet));
         }
@@ -330,8 +334,11 @@ public final class BMTrails extends JavaPlugin implements Listener {
         if(currentTrails.isEmpty()) return;
         if(separateSessionTrails){
             for(TrailSession session : trailSessions.values()){
-                MarkerSet markerSet = markerSets.get(session.world);
-                if(markerSet != null && session.points.size() > 1) markerSet.put(markerKey(session), createMarker(session.player, session.points, sessionLabel(session)));
+                MarkerSet rootMarkerSet = markerSets.get(session.world);
+                if(rootMarkerSet == null || session.points.size() <= 1) continue;
+                MarkerSet sessionMarkerSet = markerSetForSession(rootMarkerSet, session);
+                String label = sessionMarkerSet == rootMarkerSet ? sessionLabel(session) : sessionTimestampLabel(session);
+                sessionMarkerSet.put(markerKey(session), createMarker(session.player, session.points, label));
             }
             return;
         }
@@ -356,32 +363,224 @@ public final class BMTrails extends JavaPlugin implements Listener {
         }
         String label = labelOverride != null ? labelOverride : displayNamePreset.replace("%player%", nameCache.getOrDefault(player, "n/a"));
         Line line = new Line(points.toArray(Vector3d[]::new));
-        return LineMarker.builder()
+        var builder = LineMarker.builder()
                 .label(label)
                 .detail(label)
                 .line(line)
                 .lineWidth(defaultWidth)
                 .lineColor(color)
                 .centerPosition()
-                .maxDistance(maxDistance)
-                .build();
+                .maxDistance(maxDistance);
+        builder = applyMarkerToggleOptions(builder, true, false);
+        return builder.build();
     }
 
 
     private void cleanObsoleteMarkers(){
         for(Map.Entry<UUID, MarkerSet> entry : markerSets.entrySet()){
-            MarkerSet markerSet = entry.getValue();
-            markerSet.getMarkers().keySet().removeIf(key -> {
-                UUID uuid = markerPlayerId(key);
-                if(uuid == null) return true;
-                if(separateSessionTrails){
-                    TrailSession session = trailSessions.get(markerSessionId(key));
-                    return session == null || !entry.getKey().equals(session.world);
-                }
-                if(!currentTrails.containsKey(uuid)) return true;
-                if(!entry.getKey().equals(playerWorlds.get(uuid))) return true;
-                return false;
-            });
+            cleanObsoleteMarkers(entry.getValue(), entry.getKey());
+        }
+    }
+
+    private void cleanObsoleteMarkers(MarkerSet markerSet, UUID world) {
+        markerSet.getMarkers().keySet().removeIf(key -> shouldRemoveMarker(key, world));
+        Map<String, MarkerSet> childMarkerSets = childMarkerSets(markerSet);
+        if(childMarkerSets == null) return;
+        childMarkerSets.entrySet().removeIf(entry -> {
+            cleanObsoleteMarkers(entry.getValue(), world);
+            Map<String, MarkerSet> grandchildren = childMarkerSets(entry.getValue());
+            return entry.getValue().getMarkers().isEmpty() && (grandchildren == null || grandchildren.isEmpty());
+        });
+    }
+
+    private boolean shouldRemoveMarker(String key, UUID world) {
+        UUID uuid = markerPlayerId(key);
+        if(uuid == null) return true;
+        if(separateSessionTrails){
+            TrailSession session = trailSessions.get(markerSessionId(key));
+            return session == null || !world.equals(session.world);
+        }
+        if(!currentTrails.containsKey(uuid)) return true;
+        return !world.equals(playerWorlds.get(uuid));
+    }
+
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        if(separateSessionTrails) activeSessionIds.remove(event.getPlayer().getUniqueId());
+    }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        trailLastSeen.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
+        saveTrailHistory();
+    }
+
+    private TrailSession ensureActiveSession(UUID player, UUID world) {
+        UUID sessionId = activeSessionIds.computeIfAbsent(player, ignored -> UUID.randomUUID());
+        return trailSessions.computeIfAbsent(sessionId, id -> new TrailSession(id, player, world, System.currentTimeMillis(), System.currentTimeMillis(), List.of()));
+    }
+
+    private String markerKey(TrailSession session) {
+        return session.player + ":" + session.id;
+    }
+
+    private UUID markerPlayerId(String key) {
+        try{
+            return UUID.fromString(key.contains(":") ? key.substring(0, key.indexOf(':')) : key);
+        }catch(IllegalArgumentException e){
+            return null;
+        }
+    }
+
+    private UUID markerSessionId(String key) {
+        if(!key.contains(":")) return null;
+        try{
+            return UUID.fromString(key.substring(key.indexOf(':') + 1));
+        }catch(IllegalArgumentException e){
+            return null;
+        }
+    }
+
+    private String sessionLabel(TrailSession session) {
+        String player = nameCache.getOrDefault(session.player, session.player.toString());
+        return player + " " + sessionTimestampLabel(session);
+    }
+
+    private String sessionTimestampLabel(TrailSession session) {
+        return SESSION_LABEL_FORMAT.format(Instant.ofEpochMilli(session.startedAt));
+    }
+
+    private MarkerSet markerSetForSession(MarkerSet rootMarkerSet, TrailSession session) {
+        Map<String, MarkerSet> childMarkerSets = childMarkerSets(rootMarkerSet);
+        if(childMarkerSets == null) return rootMarkerSet;
+        return childMarkerSets.computeIfAbsent("player_" + session.player, key ->
+                createMarkerSet(nameCache.getOrDefault(session.player, session.player.toString()), markerSetVisibleDefault, markerSetToggleable));
+    }
+
+    private MarkerSet createMarkerSet(String label, boolean visible, boolean toggleable) {
+        return MarkerSet.builder()
+                .label(label)
+                .defaultHidden(!visible)
+                .toggleable(toggleable)
+                .build();
+    }
+
+    private <T> T applyMarkerToggleOptions(T builder, boolean toggleable, boolean defaultHidden) {
+        if(!markerToggleOptionsSupported) return builder;
+        try{
+            builder = invokeBuilderBoolean(builder, "toggleable", toggleable);
+            return invokeBuilderBoolean(builder, "defaultHidden", defaultHidden);
+        }catch(NoSuchMethodException e){
+            markerToggleOptionsSupported = false;
+        }catch(IllegalAccessException | InvocationTargetException e){
+            getLogger().log(Level.WARNING, "Unable to apply marker-level toggle options", e);
+        }
+        return builder;
+    }
+
+    private <T> T invokeBuilderBoolean(T builder, String methodName, boolean value) throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
+        Method method = builder.getClass().getMethod(methodName, boolean.class);
+        return (T) method.invoke(builder, value);
+    }
+
+    private Map<String, MarkerSet> childMarkerSets(MarkerSet markerSet) {
+        if(!nestedMarkerSetsSupported) return null;
+        try{
+            Method method = markerSet.getClass().getMethod("getMarkerSets");
+            return (Map<String, MarkerSet>) method.invoke(markerSet);
+        }catch(NoSuchMethodException e){
+            nestedMarkerSetsSupported = false;
+        }catch(IllegalAccessException | InvocationTargetException | ClassCastException e){
+            getLogger().log(Level.WARNING, "Unable to access nested BlueMap marker sets", e);
+        }
+        return null;
+    }
+
+    private boolean sameCoordinates(Vector3d first, Vector3d second) {
+        return Double.compare(first.getX(), second.getX()) == 0
+                && Double.compare(first.getY(), second.getY()) == 0
+                && Double.compare(first.getZ(), second.getZ()) == 0;
+    }
+
+    private void pruneExpiredHistory() {
+        if(historyRetentionDays <= 0) return;
+        long cutoff = System.currentTimeMillis() - historyRetentionDays * 86_400_000L;
+        currentTrails.keySet().removeIf(uuid -> trailLastSeen.getOrDefault(uuid, System.currentTimeMillis()) < cutoff);
+        trailSessions.values().removeIf(session -> session.lastSeen < cutoff);
+    }
+
+    private void loadTrailHistory() {
+        if(!persistTrails || !historyFile.exists()) return;
+        YamlConfiguration config = YamlConfiguration.loadConfiguration(historyFile);
+        for(String key : config.getConfigurationSection("players") == null ? Set.<String>of() : config.getConfigurationSection("players").getKeys(false)){
+            try{
+                UUID uuid = UUID.fromString(key);
+                UUID world = UUID.fromString(config.getString("players." + key + ".world"));
+                trailLastSeen.put(uuid, config.getLong("players." + key + ".lastSeen"));
+                playerWorlds.put(uuid, world);
+                currentTrails.put(uuid, readPoints(config.getStringList("players." + key + ".points")));
+            }catch(Exception e){
+                getLogger().log(Level.WARNING, "Ignoring invalid persisted trail for " + key, e);
+            }
+        }
+        for(String key : config.getConfigurationSection("sessions") == null ? Set.<String>of() : config.getConfigurationSection("sessions").getKeys(false)){
+            try{
+                UUID id = UUID.fromString(key);
+                TrailSession session = new TrailSession(id,
+                        UUID.fromString(config.getString("sessions." + key + ".player")),
+                        UUID.fromString(config.getString("sessions." + key + ".world")),
+                        config.getLong("sessions." + key + ".startedAt"),
+                        config.getLong("sessions." + key + ".lastSeen"),
+                        readPoints(config.getStringList("sessions." + key + ".points")));
+                trailSessions.put(id, session);
+            }catch(Exception e){
+                getLogger().log(Level.WARNING, "Ignoring invalid persisted session " + key, e);
+            }
+        }
+    }
+
+    private ConcurrentLinkedDeque<Vector3d> readPoints(List<String> points) {
+        ConcurrentLinkedDeque<Vector3d> deque = new ConcurrentLinkedDeque<>();
+        for(String point : points){
+            String[] parts = point.split(",");
+            if(parts.length == 3) deque.add(Vector3d.from(Double.parseDouble(parts[0]), Double.parseDouble(parts[1]), Double.parseDouble(parts[2])));
+        }
+        return deque;
+    }
+
+    private List<String> writePoints(Deque<Vector3d> points) {
+        return points.stream()
+                .map(point -> formatCoordinate(point.getX()) + "," + formatCoordinate(point.getY()) + "," + formatCoordinate(point.getZ()))
+                .toList();
+    }
+
+    private String formatCoordinate(double coordinate) {
+        return BigDecimal.valueOf(coordinate)
+                .setScale(3, RoundingMode.HALF_UP)
+                .stripTrailingZeros()
+                .toPlainString();
+    }
+
+    private void saveTrailHistory() {
+        if(!persistTrails || historyFile == null || currentTrails == null || trailSessions == null) return;
+        pruneExpiredHistory();
+        YamlConfiguration config = new YamlConfiguration();
+        currentTrails.forEach((uuid, points) -> {
+            config.set("players." + uuid + ".world", playerWorlds.get(uuid) == null ? null : playerWorlds.get(uuid).toString());
+            config.set("players." + uuid + ".lastSeen", trailLastSeen.getOrDefault(uuid, System.currentTimeMillis()));
+            config.set("players." + uuid + ".points", writePoints(points));
+        });
+        trailSessions.forEach((id, session) -> {
+            config.set("sessions." + id + ".player", session.player.toString());
+            config.set("sessions." + id + ".world", session.world.toString());
+            config.set("sessions." + id + ".startedAt", session.startedAt);
+            config.set("sessions." + id + ".lastSeen", session.lastSeen);
+            config.set("sessions." + id + ".points", writePoints(session.points));
+        });
+        try{
+            config.save(historyFile);
+        }catch(IOException e){
+            getLogger().log(Level.WARNING, "Unable to save trail history", e);
         }
     }
 

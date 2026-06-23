@@ -14,6 +14,25 @@ excludedMaps:
 # Can be changed to a hex color code (e.g. 'ff0000' for red)
 defaultTrailColor: 'random'
 
+
+# Persist trail history to plugins/BMTrails/trail-history.yml so trails survive player disconnects and server restarts.
+# Spigot/Paper do not provide a universal built-in SQL database for plugins, so BMTrails uses this local data file by default.
+persistTrails: true
+
+# Delete persisted history for players/sessions that have not been seen for this many days.
+# Set to 0 or a negative value to keep history indefinitely.
+historyRetentionDays: 30
+
+# When enabled, every join creates a separate trail marker for that play session instead of merging all retained points into one player trail.
+# With BlueMap versions that support nested marker sets and marker-level toggles, sessions are grouped under each player and can be toggled individually.
+# Older BlueMap versions fall back to listing the session markers in the main marker set.
+separateSessionTrails: false
+
+# Optional manual trail colors for specific players. Keys may be player names or UUIDs; values are rrggbb hex colors.
+# These overrides take precedence over permissionOverrides and defaultTrailColor.
+playerColorOverrides:
+  # Notch: '00ff00'
+
 # Set this to true if you want to configure player specific colors using permissions.
 # This additional toggle exists because permissions cannot be checked asynchronously and would affect performance even if you are not using them at all.
 usePermissionOverrides: false

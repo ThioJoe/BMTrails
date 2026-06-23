@@ -382,9 +382,25 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private Color trailColor(UUID player){
         Color cached = colorCache.get(player);
         if(cached != null) return cached;
+        // Player is offline: colorCache misses, so re-check the static per-player overrides ourselves
+        // (permission-based overrides can't be resolved without an online player and are skipped).
+        Color override = playerOverrideColor(player);
+        if(override != null) return override;
         if(defaultColor != null) return defaultColor;
         // Deterministic, opaque per-player colour - mirrors the random fallback resolveColor() uses while online.
         return new Color(0xff000000 | new Random(resolvePlayerName(player).hashCode()).nextInt());
+    }
+
+    private Color playerOverrideColor(UUID player){
+        if(playerColorOverrides == null || playerColorOverrides.isEmpty()) return null;
+        Color byUuid = playerColorOverrides.get(player.toString().toLowerCase(Locale.ROOT));
+        if(byUuid != null) return byUuid;
+        String name = resolvePlayerName(player);
+        if(name != null){
+            Color byName = playerColorOverrides.get(name.toLowerCase(Locale.ROOT));
+            if(byName != null) return byName;
+        }
+        return null;
     }
 
     private void cleanObsoleteMarkers(){

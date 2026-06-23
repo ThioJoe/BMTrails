@@ -361,7 +361,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
             color = defaultColor;
             if(color == null) color = new Color(0xffffff);
         }
-        String label = labelOverride != null ? labelOverride : displayNamePreset.replace("%player%", nameCache.getOrDefault(player, "n/a"));
+        String label = labelOverride != null ? labelOverride : displayNamePreset.replace("%player%", resolvePlayerName(player));
         Line line = new Line(points.toArray(Vector3d[]::new));
         var builder = LineMarker.builder()
                 .label(label)
@@ -442,19 +442,41 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     private String sessionLabel(TrailSession session) {
-        String player = nameCache.getOrDefault(session.player, session.player.toString());
-        return player + " " + sessionTimestampLabel(session);
+        return resolvePlayerName(session.player) + " " + sessionTimestampLabel(session);
     }
 
     private String sessionTimestampLabel(TrailSession session) {
         return SESSION_LABEL_FORMAT.format(Instant.ofEpochMilli(session.startedAt));
     }
 
+    /**
+     * Resolves a display name for the given player. The live {@link #nameCache} only contains currently-online
+     * players, so for offline players (e.g. ones restored from persisted history) we fall back to the server's
+     * cached offline-player name, and only use the raw UUID as a last resort.
+     */
+    private String resolvePlayerName(UUID player) {
+        String cached = nameCache == null ? null : nameCache.get(player);
+        if(cached != null) return cached;
+        try{
+            String offline = Bukkit.getOfflinePlayer(player).getName();
+            if(offline != null && !offline.isBlank()) return offline;
+        }catch(Exception ignored){
+            // fall through to the UUID
+        }
+        return player.toString();
+    }
+
     private MarkerSet markerSetForSession(MarkerSet rootMarkerSet, TrailSession session) {
         Map<String, MarkerSet> childMarkerSets = childMarkerSets(rootMarkerSet);
         if(childMarkerSets == null) return rootMarkerSet;
-        return childMarkerSets.computeIfAbsent("player_" + session.player, key ->
-                createMarkerSet(nameCache.getOrDefault(session.player, session.player.toString()), markerSetVisibleDefault, markerSetToggleable));
+        String label = resolvePlayerName(session.player);
+        MarkerSet sessionMarkerSet = childMarkerSets.computeIfAbsent("player_" + session.player, key ->
+                createMarkerSet(label, markerSetVisibleDefault, markerSetToggleable));
+        // The set is only created once, but the name may not have been resolvable at creation time
+        // (e.g. created from persisted history while the player was offline) - refresh it once we know better.
+        if(!label.equals(session.player.toString()) && !label.equals(sessionMarkerSet.getLabel()))
+            sessionMarkerSet.setLabel(label);
+        return sessionMarkerSet;
     }
 
     private MarkerSet createMarkerSet(String label, boolean visible, boolean toggleable) {

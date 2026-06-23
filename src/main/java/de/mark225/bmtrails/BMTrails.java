@@ -356,11 +356,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     private LineMarker createMarker(UUID player, Deque<Vector3d> points, String labelOverride){
-        Color color = colorCache.get(player);
-        if(color == null){
-            color = defaultColor;
-            if(color == null) color = new Color(0xffffff);
-        }
+        Color color = trailColor(player);
         String label = labelOverride != null ? labelOverride : displayNamePreset.replace("%player%", resolvePlayerName(player));
         Line line = new Line(points.toArray(Vector3d[]::new));
         var builder = LineMarker.builder()
@@ -375,6 +371,21 @@ public final class BMTrails extends JavaPlugin implements Listener {
         return builder.build();
     }
 
+
+    /**
+     * Resolves the colour to draw a player's trail with. The live {@link #colorCache} is cleared every refresh and
+     * only repopulated for online players, so for offline players (e.g. trails restored from persisted history) it
+     * misses. We must still return a <b>fully-opaque</b> colour - the previous {@code new Color(0xffffff)} fallback
+     * had an alpha of 0 (the high byte is the alpha channel), which made offline trails completely transparent and
+     * therefore invisible on the map even though the marker was still present/listed.
+     */
+    private Color trailColor(UUID player){
+        Color cached = colorCache.get(player);
+        if(cached != null) return cached;
+        if(defaultColor != null) return defaultColor;
+        // Deterministic, opaque per-player colour - mirrors the random fallback resolveColor() uses while online.
+        return new Color(0xff000000 | new Random(resolvePlayerName(player).hashCode()).nextInt());
+    }
 
     private void cleanObsoleteMarkers(){
         for(Map.Entry<UUID, MarkerSet> entry : markerSets.entrySet()){

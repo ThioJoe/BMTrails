@@ -100,6 +100,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     private static BMTrails bmTrails;
+    private static final long[][] HEATMAP_NEIGHBORS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
     private static final String PERM_VISIBLE = "bmtrails.visible";
     private static final String PERM_COLOR_PREFIX = "bmtrails.color.";
     private static final String PERM_CUSTOM_COLOR = "bmtrails.customcolor";
@@ -717,72 +718,88 @@ public final class BMTrails extends JavaPlugin implements Listener {
         int levels = distinctCounts.size();
         int alpha = (int) Math.round(heatmapOpacity * 255.0);
 
-        // Quantise each cell's rank into a fixed number of colour bands (heatmapColorLevels) and average height.
-        // Without bucketing, the dense rank produces almost as many distinct colours as there are cells, so
-        // visually-identical neighbours rarely share an EXACT colour and therefore can't be merged below. Grouping
-        // into a handful of bands lets large same-colour regions collapse into a few rectangles while keeping the
-        // rank-based (not magnitude-based) shading.
+        // Quantise each cell's rank into a fixed number of colour bands (heatmapColorLevels) and snap its height to
+        // the nearest whole block. Without colour bucketing the dense rank produces almost as many distinct colours
+        // as there are cells, so visually-identical neighbours rarely share an EXACT colour and can't be merged.
         int bands = Math.max(1, heatmapColorLevels);
-        Map<Long, Double> heightByCell = new HashMap<>();
-        Map<Integer, List<Long>> cellsByBand = new HashMap<>();
+        Map<Long, Integer> snappedHeight = new HashMap<>();
+        Map<Integer, Set<Long>> cellsByBand = new HashMap<>();
         for(Map.Entry<Long, int[]> entry : counts.entrySet()){
             long key = entry.getKey();
             int count = entry.getValue()[0];
-            heightByCell.put(key, heights.get(key)[0] / count);
+            snappedHeight.put(key, (int) Math.round(heights.get(key)[0] / count));
             double rank = levels <= 1 ? 1.0 : (double) rankByCount.get(count) / (levels - 1);
             int band = bands <= 1 ? 0 : (int) Math.round(rank * (bands - 1));
-            cellsByBand.computeIfAbsent(band, k -> new ArrayList<>()).add(key);
+            cellsByBand.computeIfAbsent(band, k -> new HashSet<>()).add(key);
         }
 
-        // Merge contiguous same-colour cells into maximal rectangles to cut the marker count (BlueMap renders one
-        // polygon per marker, so thousands of tiny cells lag the web client). Cells only merge while their height
-        // stays within heatmapMergeHeightTolerance of the rectangle's seed cell, so a tall structure isn't flattened
-        // onto the ground; the merged rectangle is drawn at its cells' average height.
-        for(Map.Entry<Integer, List<Long>> bandEntry : cellsByBand.entrySet()){
+        // Within each colour band, flood-fill connected regions where adjacent cells differ in (snapped) height by no
+        // more than heatmapMergeHeightTolerance, and draw every rectangle of a region at the region's single average
+        // height. This keeps abutting rectangles perfectly coplanar (no sub-block height seams between them, which is
+        // what made merged cells still look like separate strips) while a tall structure that jumps more than the
+        // tolerance starts a new region instead of being flattened onto the ground.
+        for(Map.Entry<Integer, Set<Long>> bandEntry : cellsByBand.entrySet()){
             double t = bands <= 1 ? 1.0 : (double) bandEntry.getKey() / (bands - 1);
-            Set<Long> remaining = new HashSet<>(bandEntry.getValue());
-            List<Long> ordered = bandEntry.getValue().stream()
-                    .sorted(Comparator.<Long>comparingLong(l -> unpackZ(l)).thenComparingLong(l -> unpackX(l)))
-                    .toList();
-            for(long seed : ordered){
-                if(!remaining.contains(seed)) continue;
-                long cx0 = unpackX(seed), cz0 = unpackZ(seed);
-                double seedHeight = heightByCell.get(seed);
-                // Grow east as far as same-colour, height-compatible cells allow, then grow south by whole rows.
-                long cx1 = cx0;
-                while(canMergeCell(remaining, heightByCell, packCell(cx1 + 1, cz0), seedHeight)) cx1++;
-                long cz1 = cz0;
-                while(rowMergeable(remaining, heightByCell, cx0, cx1, cz1 + 1, seedHeight)) cz1++;
-                double heightSum = 0;
-                int n = 0;
-                for(long cxx = cx0; cxx <= cx1; cxx++){
-                    for(long czz = cz0; czz <= cz1; czz++){
-                        long k = packCell(cxx, czz);
-                        remaining.remove(k);
-                        heightSum += heightByCell.get(k);
-                        n++;
+            Set<Long> bandCells = bandEntry.getValue();
+            Set<Long> visited = new HashSet<>();
+            for(long start : bandCells){
+                if(!visited.add(start)) continue;
+                List<Long> region = new ArrayList<>();
+                Deque<Long> stack = new ArrayDeque<>();
+                stack.push(start);
+                region.add(start);
+                while(!stack.isEmpty()){
+                    long cur = stack.pop();
+                    int curHeight = snappedHeight.get(cur);
+                    long cx = unpackX(cur), cz = unpackZ(cur);
+                    for(long[] dir : HEATMAP_NEIGHBORS){
+                        long nb = packCell(cx + dir[0], cz + dir[1]);
+                        if(bandCells.contains(nb) && !visited.contains(nb)
+                                && Math.abs(snappedHeight.get(nb) - curHeight) <= heatmapMergeHeightTolerance){
+                            visited.add(nb);
+                            stack.push(nb);
+                            region.add(nb);
+                        }
                     }
                 }
-                double y = heightSum / n;
-                double rx1 = cx0 * (double) heatmapCellSize;
-                double rz1 = cz0 * (double) heatmapCellSize;
-                double rx2 = (cx1 + 1) * (double) heatmapCellSize;
-                double rz2 = (cz1 + 1) * (double) heatmapCellSize;
-                cells.put(prefix + cx0 + "_" + cz0 + "_" + cx1 + "_" + cz1,
-                        heatmapRect(rx1, rz1, rx2, rz2, y, t, alpha, label));
+                double regionY = region.stream().mapToInt(snappedHeight::get).average().orElse(0);
+                meshRegion(cells, prefix, label, region, regionY, t, alpha);
             }
         }
         return cells;
     }
 
-    private boolean canMergeCell(Set<Long> remaining, Map<Long, Double> heightByCell, long key, double seedHeight){
-        Double height = heightByCell.get(key);
-        return remaining.contains(key) && height != null && Math.abs(height - seedHeight) <= heatmapMergeHeightTolerance;
+    /**
+     * Greedy-meshes a connected region of cells into maximal rectangles (grow east, then south by whole rows) and adds
+     * one {@link ShapeMarker} per rectangle, all at the same {@code regionY} so they tile seamlessly.
+     */
+    private void meshRegion(Map<String, ShapeMarker> cells, String prefix, String label, List<Long> region, double regionY, double t, int alpha){
+        Set<Long> remaining = new HashSet<>(region);
+        List<Long> ordered = region.stream()
+                .sorted(Comparator.<Long>comparingLong(l -> unpackZ(l)).thenComparingLong(l -> unpackX(l)))
+                .toList();
+        for(long seed : ordered){
+            if(!remaining.contains(seed)) continue;
+            long cx0 = unpackX(seed), cz0 = unpackZ(seed);
+            long cx1 = cx0;
+            while(remaining.contains(packCell(cx1 + 1, cz0))) cx1++;
+            long cz1 = cz0;
+            while(rowPresent(remaining, cx0, cx1, cz1 + 1)) cz1++;
+            for(long cxx = cx0; cxx <= cx1; cxx++)
+                for(long czz = cz0; czz <= cz1; czz++)
+                    remaining.remove(packCell(cxx, czz));
+            double rx1 = cx0 * (double) heatmapCellSize;
+            double rz1 = cz0 * (double) heatmapCellSize;
+            double rx2 = (cx1 + 1) * (double) heatmapCellSize;
+            double rz2 = (cz1 + 1) * (double) heatmapCellSize;
+            cells.put(prefix + cx0 + "_" + cz0 + "_" + cx1 + "_" + cz1,
+                    heatmapRect(rx1, rz1, rx2, rz2, regionY, t, alpha, label));
+        }
     }
 
-    private boolean rowMergeable(Set<Long> remaining, Map<Long, Double> heightByCell, long cx0, long cx1, long cz, double seedHeight){
+    private boolean rowPresent(Set<Long> remaining, long cx0, long cx1, long cz){
         for(long cxx = cx0; cxx <= cx1; cxx++){
-            if(!canMergeCell(remaining, heightByCell, packCell(cxx, cz), seedHeight)) return false;
+            if(!remaining.contains(packCell(cxx, cz))) return false;
         }
         return true;
     }

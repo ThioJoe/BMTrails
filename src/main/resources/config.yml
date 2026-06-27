@@ -139,8 +139,9 @@ heatmapMaxDistance: 1000
 
 # Performance optimization: adjacent heatmap cells of the same color are merged into larger rectangles so the
 # web client draws far fewer markers (a small heatmapCellSize can otherwise create thousands of squares and lag
-# the browser). Two adjacent cells are only merged when their heights differ by no more than this many blocks,
-# and a merged rectangle is drawn at the average height of its cells. Larger values merge more aggressively
-# (better performance) but can flatten cells that sit at noticeably different heights onto one plane; 0 only
-# merges cells that are at the same height.
+# the browser). Same-colored cells are grouped into connected regions where neighbouring cells differ in height
+# by no more than this many blocks, and every rectangle in a region is drawn at the region's single average
+# height so they tile together seamlessly (without this they sit at slightly different heights and the merged
+# pieces still look like separate strips). Larger values merge across bigger height differences (better
+# performance, but can flatten gentle slopes onto one plane); 0 only merges cells that are at the same height.
 heatmapMergeHeightTolerance: 8

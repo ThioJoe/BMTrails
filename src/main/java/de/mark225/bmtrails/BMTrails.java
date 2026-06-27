@@ -85,6 +85,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
         public static final ConfigValue<String> HEATMAP_MIN_COLOR = new ConfigValue<>("heatmapMinColor", "00ff00");
         public static final ConfigValue<String> HEATMAP_MAX_COLOR = new ConfigValue<>("heatmapMaxColor", "ff0000");
         public static final ConfigValue<Integer> HEATMAP_MAX_DISTANCE = new ConfigValue<>("heatmapMaxDistance", 1000);
+        public static final ConfigValue<Integer> HEATMAP_MERGE_HEIGHT_TOLERANCE = new ConfigValue<>("heatmapMergeHeightTolerance", 8);
 
         public T getValue(){
             Object fromConfig = config.get(key, defaultValue);
@@ -154,6 +155,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private int[] heatmapMinRgb;
     private int[] heatmapMaxRgb;
     private int heatmapMaxDistance;
+    private int heatmapMergeHeightTolerance;
     private File historyFile;
 
 
@@ -242,6 +244,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
         heatmapMinRgb = parseRgb(ConfigValue.HEATMAP_MIN_COLOR.getValue(), new int[]{0x00, 0xff, 0x00});
         heatmapMaxRgb = parseRgb(ConfigValue.HEATMAP_MAX_COLOR.getValue(), new int[]{0xff, 0x00, 0x00});
         heatmapMaxDistance = ConfigValue.HEATMAP_MAX_DISTANCE.getValue();
+        heatmapMergeHeightTolerance = Math.max(0, ConfigValue.HEATMAP_MERGE_HEIGHT_TOLERANCE.getValue());
         Pattern overridePattern = Pattern.compile("[a-zA-Z0-9]+:[0-9a-fA-F]{6}");
         colorPermissions = ConfigValue.PERMISSION_OVERRIDES.getValue().stream()
                 .filter(str -> overridePattern.matcher(str).matches())
@@ -712,33 +715,86 @@ public final class BMTrails extends JavaPlugin implements Listener {
         int levels = distinctCounts.size();
         int alpha = (int) Math.round(heatmapOpacity * 255.0);
 
+        // Pre-compute each occupied cell's colour level (dense rank) and average height.
+        Map<Long, Double> heightByCell = new HashMap<>();
+        Map<Integer, List<Long>> cellsByLevel = new HashMap<>();
         for(Map.Entry<Long, int[]> entry : counts.entrySet()){
-            long packed = entry.getKey();
+            long key = entry.getKey();
             int count = entry.getValue()[0];
-            double t = levels <= 1 ? 1.0 : (double) rankByCount.get(count) / (levels - 1);
-            long cx = unpackX(packed);
-            long cz = unpackZ(packed);
-            double x1 = cx * (double) heatmapCellSize;
-            double z1 = cz * (double) heatmapCellSize;
-            double y = heights.get(packed)[0] / count;
-            Shape shape = Shape.createRect(x1, z1, x1 + heatmapCellSize, z1 + heatmapCellSize);
-            var builder = ShapeMarker.builder()
-                    .label(label)
-                    .detail(label)
-                    .shape(shape, (float) y)
-                    .position(x1 + heatmapCellSize / 2.0, y, z1 + heatmapCellSize / 2.0)
-                    .fillColor(heatColor(t, alpha))
-                    .lineColor(new Color(0x00000000))
-                    .lineWidth(1)
-                    .depthTestEnabled(false)
-                    .maxDistance(heatmapMaxDistance);
-            // Individual cells make up one combined heatmap: keep them out of the marker list and not separately
-            // toggleable so the per-session marker set is the single toggle the user sees and interacts with.
-            builder = applyMarkerUnlisted(builder);
-            builder = applyMarkerToggleOptions(builder, false, false);
-            cells.put(prefix + cx + "_" + cz, builder.build());
+            heightByCell.put(key, heights.get(key)[0] / count);
+            cellsByLevel.computeIfAbsent(rankByCount.get(count), k -> new ArrayList<>()).add(key);
+        }
+
+        // Merge contiguous same-colour cells into maximal rectangles to cut the marker count (BlueMap renders one
+        // polygon per marker, so thousands of tiny cells lag the web client). Cells only merge while their height
+        // stays within heatmapMergeHeightTolerance of the rectangle's seed cell, so a tall structure isn't flattened
+        // onto the ground; the merged rectangle is drawn at its cells' average height.
+        for(Map.Entry<Integer, List<Long>> levelEntry : cellsByLevel.entrySet()){
+            double t = levels <= 1 ? 1.0 : (double) levelEntry.getKey() / (levels - 1);
+            Set<Long> remaining = new HashSet<>(levelEntry.getValue());
+            List<Long> ordered = levelEntry.getValue().stream()
+                    .sorted(Comparator.<Long>comparingLong(l -> unpackZ(l)).thenComparingLong(l -> unpackX(l)))
+                    .toList();
+            for(long seed : ordered){
+                if(!remaining.contains(seed)) continue;
+                long cx0 = unpackX(seed), cz0 = unpackZ(seed);
+                double seedHeight = heightByCell.get(seed);
+                // Grow east as far as same-colour, height-compatible cells allow, then grow south by whole rows.
+                long cx1 = cx0;
+                while(canMergeCell(remaining, heightByCell, packCell(cx1 + 1, cz0), seedHeight)) cx1++;
+                long cz1 = cz0;
+                while(rowMergeable(remaining, heightByCell, cx0, cx1, cz1 + 1, seedHeight)) cz1++;
+                double heightSum = 0;
+                int n = 0;
+                for(long cxx = cx0; cxx <= cx1; cxx++){
+                    for(long czz = cz0; czz <= cz1; czz++){
+                        long k = packCell(cxx, czz);
+                        remaining.remove(k);
+                        heightSum += heightByCell.get(k);
+                        n++;
+                    }
+                }
+                double y = heightSum / n;
+                double rx1 = cx0 * (double) heatmapCellSize;
+                double rz1 = cz0 * (double) heatmapCellSize;
+                double rx2 = (cx1 + 1) * (double) heatmapCellSize;
+                double rz2 = (cz1 + 1) * (double) heatmapCellSize;
+                cells.put(prefix + cx0 + "_" + cz0 + "_" + cx1 + "_" + cz1,
+                        heatmapRect(rx1, rz1, rx2, rz2, y, t, alpha, label));
+            }
         }
         return cells;
+    }
+
+    private boolean canMergeCell(Set<Long> remaining, Map<Long, Double> heightByCell, long key, double seedHeight){
+        Double height = heightByCell.get(key);
+        return remaining.contains(key) && height != null && Math.abs(height - seedHeight) <= heatmapMergeHeightTolerance;
+    }
+
+    private boolean rowMergeable(Set<Long> remaining, Map<Long, Double> heightByCell, long cx0, long cx1, long cz, double seedHeight){
+        for(long cxx = cx0; cxx <= cx1; cxx++){
+            if(!canMergeCell(remaining, heightByCell, packCell(cxx, cz), seedHeight)) return false;
+        }
+        return true;
+    }
+
+    private ShapeMarker heatmapRect(double x1, double z1, double x2, double z2, double y, double t, int alpha, String label){
+        Shape shape = Shape.createRect(x1, z1, x2, z2);
+        var builder = ShapeMarker.builder()
+                .label(label)
+                .detail(label)
+                .shape(shape, (float) y)
+                .position((x1 + x2) / 2.0, y, (z1 + z2) / 2.0)
+                .fillColor(heatColor(t, alpha))
+                .lineColor(new Color(0x00000000))
+                .lineWidth(1)
+                .depthTestEnabled(false)
+                .maxDistance(heatmapMaxDistance);
+        // Merged cells make up one combined heatmap: keep them out of the marker list and not separately toggleable
+        // so the per-session marker set is the single toggle the user sees and interacts with.
+        builder = applyMarkerUnlisted(builder);
+        builder = applyMarkerToggleOptions(builder, false, false);
+        return builder.build();
     }
 
     private long cellIndex(double coordinate){

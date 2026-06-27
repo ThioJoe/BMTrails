@@ -1,5 +1,6 @@
 package de.mark225.bmtrails;
 
+import com.flowpowered.math.vector.Vector2d;
 import com.flowpowered.math.vector.Vector3d;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
@@ -763,7 +764,19 @@ public final class BMTrails extends JavaPlugin implements Listener {
                     }
                 }
                 double regionY = region.stream().mapToInt(snappedHeight::get).average().orElse(0);
-                meshRegion(cells, prefix, label, region, regionY, t, alpha);
+                // A connected region without holes can be drawn as ONE polygon marker (its outline), which is far
+                // cheaper than slicing it into many rectangles. Regions with holes fall back to greedy meshing.
+                List<long[]> outline = regionOutline(region);
+                if(outline != null){
+                    long anchor = region.get(0);
+                    for(long c : region){
+                        if(unpackZ(c) < unpackZ(anchor) || (unpackZ(c) == unpackZ(anchor) && unpackX(c) < unpackX(anchor))) anchor = c;
+                    }
+                    cells.put(prefix + "p" + unpackX(anchor) + "_" + unpackZ(anchor),
+                            heatmapPolygon(outline, regionY, t, alpha, label));
+                }else{
+                    meshRegion(cells, prefix, label, region, regionY, t, alpha);
+                }
             }
         }
         return cells;
@@ -802,6 +815,70 @@ public final class BMTrails extends JavaPlugin implements Listener {
             if(!remaining.contains(packCell(cxx, cz))) return false;
         }
         return true;
+    }
+
+    /**
+     * Traces the outline of a connected region of cells as a single rectilinear polygon (list of {cornerX, cornerZ}
+     * in cell-corner units, collinear points removed). Returns {@code null} if the region has a hole or its boundary
+     * touches itself at a corner, in which case the caller falls back to rectangle meshing. Each boundary edge is
+     * emitted with the interior on a consistent side, so a hole-free region yields exactly one closed loop.
+     */
+    private List<long[]> regionOutline(List<Long> region){
+        Set<Long> cellSet = new HashSet<>(region);
+        Map<Long, Long> next = new HashMap<>();
+        for(long c : region){
+            long cx = unpackX(c), cz = unpackZ(c);
+            if(!cellSet.contains(packCell(cx, cz - 1)) && next.put(packCell(cx, cz), packCell(cx + 1, cz)) != null) return null;
+            if(!cellSet.contains(packCell(cx + 1, cz)) && next.put(packCell(cx + 1, cz), packCell(cx + 1, cz + 1)) != null) return null;
+            if(!cellSet.contains(packCell(cx, cz + 1)) && next.put(packCell(cx + 1, cz + 1), packCell(cx, cz + 1)) != null) return null;
+            if(!cellSet.contains(packCell(cx - 1, cz)) && next.put(packCell(cx, cz + 1), packCell(cx, cz)) != null) return null;
+        }
+        if(next.isEmpty()) return null;
+        List<Long> loop = new ArrayList<>();
+        long start = next.keySet().iterator().next();
+        long cur = start;
+        do {
+            loop.add(cur);
+            Long nx = next.get(cur);
+            if(nx == null) return null;
+            cur = nx;
+        } while(cur != start && loop.size() <= next.size());
+        if(cur != start || loop.size() != next.size()) return null; // unclosed, or more than one loop => holes
+        // Drop collinear corners so a plain rectangle stays 4 points.
+        int n = loop.size();
+        List<long[]> points = new ArrayList<>();
+        for(int i = 0; i < n; i++){
+            long prev = loop.get((i - 1 + n) % n), curr = loop.get(i), nxt = loop.get((i + 1) % n);
+            boolean sameX = unpackX(prev) == unpackX(curr) && unpackX(curr) == unpackX(nxt);
+            boolean sameZ = unpackZ(prev) == unpackZ(curr) && unpackZ(curr) == unpackZ(nxt);
+            if(!sameX && !sameZ) points.add(new long[]{unpackX(curr), unpackZ(curr)});
+        }
+        return points;
+    }
+
+    private ShapeMarker heatmapPolygon(List<long[]> outline, double y, double t, int alpha, String label){
+        Vector2d[] points = new Vector2d[outline.size()];
+        double minX = Double.MAX_VALUE, maxX = -Double.MAX_VALUE, minZ = Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+        for(int i = 0; i < outline.size(); i++){
+            double wx = outline.get(i)[0] * (double) heatmapCellSize;
+            double wz = outline.get(i)[1] * (double) heatmapCellSize;
+            points[i] = new Vector2d(wx, wz);
+            minX = Math.min(minX, wx); maxX = Math.max(maxX, wx);
+            minZ = Math.min(minZ, wz); maxZ = Math.max(maxZ, wz);
+        }
+        var builder = ShapeMarker.builder()
+                .label(label)
+                .detail(label)
+                .shape(new Shape(points), (float) y)
+                .position((minX + maxX) / 2.0, y, (minZ + maxZ) / 2.0)
+                .fillColor(heatColor(t, alpha))
+                .lineColor(new Color(0x00000000))
+                .lineWidth(1)
+                .depthTestEnabled(false)
+                .maxDistance(heatmapMaxDistance);
+        builder = applyMarkerUnlisted(builder);
+        builder = applyMarkerToggleOptions(builder, false, false);
+        return builder.build();
     }
 
     private ShapeMarker heatmapRect(double x1, double z1, double x2, double z2, double y, double t, int alpha, String label){

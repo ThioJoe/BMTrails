@@ -29,10 +29,13 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -208,8 +211,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     public void refreshConfig(){
-        ConfigValue.config = getConfig();
         saveDefaultConfig();
+        migrateConfig();
+        reloadConfig();
+        ConfigValue.config = getConfig();
         permissionFilter = Boolean.TRUE.equals(ConfigValue.PERMISSION_VISIBLE.getValue());
         maxTrailLength = ConfigValue.MAX_TRAIL_POINTS.getValue();
         displayNamePreset = ConfigValue.DISPLAY_NAME.getValue();
@@ -255,6 +260,117 @@ public final class BMTrails extends JavaPlugin implements Listener {
         }
         maxDistance = ConfigValue.MAX_DISTANCE.getValue();
         teleportDetectionThreshold = ConfigValue.TELEPORT_DETECTION_THRESHOLD.getValue();
+    }
+
+    /**
+     * Adds any top-level settings (and their comment lines) that are present in the bundled default config but
+     * missing from the user's config.yml, appending them to the end of the existing file. The user's file is otherwise
+     * left exactly as-is - including any custom comments or reordering they made - so this only ever grows the file
+     * with the defaults they are missing (e.g. after a plugin update introduces new options). Order is not preserved;
+     * missing settings are simply appended.
+     */
+    private void migrateConfig(){
+        File configFile = new File(getDataFolder(), "config.yml");
+        if(!configFile.exists()) return; // Fresh installs already get the complete default from saveDefaultConfig().
+        String defaultText;
+        try(InputStream in = getResource("config.yml")){
+            if(in == null) return;
+            defaultText = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }catch(IOException e){
+            getLogger().log(Level.WARNING, "Unable to read bundled default config for migration", e);
+            return;
+        }
+        String userText;
+        try{
+            userText = Files.readString(configFile.toPath(), StandardCharsets.UTF_8);
+        }catch(IOException e){
+            getLogger().log(Level.WARNING, "Unable to read config.yml for migration", e);
+            return;
+        }
+
+        Set<String> existingKeys = topLevelKeys(userText);
+        List<ConfigSegment> segments = parseConfigSegments(defaultText);
+        List<ConfigSegment> missing = segments.stream()
+                .filter(segment -> !existingKeys.contains(segment.key()))
+                .toList();
+        if(missing.isEmpty()) return;
+
+        List<String> lines = new ArrayList<>();
+        for(ConfigSegment segment : missing){
+            List<String> leading = segment.leading();
+            // The very first segment carries the file header comment block; strip it (everything up to and including
+            // the first blank line) so we don't duplicate the header at the bottom of the user's file.
+            if(segment.first()){
+                int firstBlank = leading.indexOf("");
+                if(firstBlank >= 0) leading = leading.subList(firstBlank + 1, leading.size());
+            }
+            lines.addAll(leading);
+            lines.addAll(segment.value());
+        }
+        // Trim leading/trailing blank lines from the appended block.
+        while(!lines.isEmpty() && lines.get(0).isBlank()) lines.remove(0);
+        while(!lines.isEmpty() && lines.get(lines.size() - 1).isBlank()) lines.remove(lines.size() - 1);
+        if(lines.isEmpty()) return;
+
+        StringBuilder sb = new StringBuilder(userText);
+        if(!userText.endsWith("\n")) sb.append("\n");
+        sb.append("\n# ===== The following settings were added automatically by BMTrails =====\n");
+        sb.append(String.join("\n", lines)).append("\n");
+        try{
+            Files.writeString(configFile.toPath(), sb.toString(), StandardCharsets.UTF_8);
+            getLogger().log(Level.INFO, "Added " + missing.size() + " missing config setting(s) to config.yml: "
+                    + missing.stream().map(ConfigSegment::key).collect(Collectors.joining(", ")));
+        }catch(IOException e){
+            getLogger().log(Level.WARNING, "Unable to write migrated config.yml", e);
+        }
+    }
+
+    private record ConfigSegment(String key, List<String> leading, List<String> value, boolean first) {}
+
+    private Set<String> topLevelKeys(String text){
+        Set<String> keys = new HashSet<>();
+        for(String line : text.split("\n", -1)){
+            if(isTopLevelKey(line)) keys.add(line.substring(0, line.indexOf(':')));
+        }
+        return keys;
+    }
+
+    /**
+     * Splits config text into one segment per top-level key. Each segment owns all comment/blank lines since the
+     * previous key (so a setting's documentation travels with it) plus the key line and any indented value lines.
+     */
+    private List<ConfigSegment> parseConfigSegments(String text){
+        String[] lines = text.split("\n", -1);
+        List<ConfigSegment> segments = new ArrayList<>();
+        List<String> pending = new ArrayList<>();
+        int i = 0;
+        while(i < lines.length){
+            String line = lines[i];
+            if(isTopLevelKey(line)){
+                List<String> value = new ArrayList<>();
+                value.add(line);
+                i++;
+                while(i < lines.length && isValueContinuation(lines[i])){
+                    value.add(lines[i]);
+                    i++;
+                }
+                segments.add(new ConfigSegment(line.substring(0, line.indexOf(':')),
+                        new ArrayList<>(pending), value, segments.isEmpty()));
+                pending.clear();
+            }else{
+                pending.add(line);
+                i++;
+            }
+        }
+        return segments;
+    }
+
+    private boolean isTopLevelKey(String line){
+        return line.matches("^[A-Za-z0-9_]+:.*");
+    }
+
+    private boolean isValueContinuation(String line){
+        return line.startsWith(" ") || line.startsWith("\t");
     }
 
     private int[] parseRgb(String hex, int[] fallback){

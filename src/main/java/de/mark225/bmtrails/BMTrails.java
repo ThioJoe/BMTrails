@@ -142,6 +142,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private boolean markerSetVisibleDefault;
     private boolean markerSetToggleable;
     private boolean markerToggleOptionsSupported = true;
+    private boolean markerListedSupported = true;
     private boolean nestedMarkerSetsSupported = true;
     private boolean enableTrails;
     private boolean enableHeatmaps;
@@ -715,7 +716,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
             double z1 = cz * (double) heatmapCellSize;
             double y = entry.getValue()[1] / weight;
             Shape shape = Shape.createRect(x1, z1, x1 + heatmapCellSize, z1 + heatmapCellSize);
-            ShapeMarker marker = ShapeMarker.builder()
+            var builder = ShapeMarker.builder()
                     .label(label)
                     .detail(label)
                     .shape(shape, (float) y)
@@ -724,9 +725,12 @@ public final class BMTrails extends JavaPlugin implements Listener {
                     .lineColor(new Color(0x00000000))
                     .lineWidth(1)
                     .depthTestEnabled(false)
-                    .maxDistance(heatmapMaxDistance)
-                    .build();
-            cells.put(prefix + cx + "_" + cz, marker);
+                    .maxDistance(heatmapMaxDistance);
+            // Individual cells make up one combined heatmap: keep them out of the marker list and not separately
+            // toggleable so the per-session marker set is the single toggle the user sees and interacts with.
+            builder = applyMarkerUnlisted(builder);
+            builder = applyMarkerToggleOptions(builder, false, false);
+            cells.put(prefix + cx + "_" + cz, builder.build());
         }
         return cells;
     }
@@ -924,6 +928,23 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private <T> T invokeBuilderBoolean(T builder, String methodName, boolean value) throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
         Method method = builder.getClass().getMethod(methodName, boolean.class);
         return (T) method.invoke(builder, value);
+    }
+
+    /**
+     * Marks a marker builder as not listed in BlueMap's marker menu, so heatmap cells don't clutter the layer list -
+     * only the per-session marker set shows as a single toggle. Done reflectively because older BlueMap builds may not
+     * expose the {@code listed} builder option.
+     */
+    private <T> T applyMarkerUnlisted(T builder) {
+        if(!markerListedSupported) return builder;
+        try{
+            return invokeBuilderBoolean(builder, "listed", false);
+        }catch(NoSuchMethodException e){
+            markerListedSupported = false;
+        }catch(IllegalAccessException | InvocationTargetException e){
+            getLogger().log(Level.WARNING, "Unable to apply marker listed option", e);
+        }
+        return builder;
     }
 
     private Map<String, MarkerSet> childMarkerSets(MarkerSet markerSet) {

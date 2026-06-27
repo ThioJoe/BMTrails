@@ -2,6 +2,14 @@
 #
 # This config is reloaded automatically on every /bluemap reload
 
+# BMTrails can display two separate top-level overlays in BlueMap, both built from the same sampled
+# position data (so enabling heatmaps does not store any extra data):
+#   - Player Trails:   line markers showing each player's recent path
+#   - Player Heatmaps: semi-transparent squares shading where players spent the most time
+# Enable or disable each overlay independently. Disabling both makes the plugin do nothing.
+enablePlayerTrails: true
+enablePlayerHeatmaps: true
+
 markerSetName: 'Player Trails'
 markerSetVisibleDefault: true
 markerSetToggleable: true
@@ -81,3 +89,66 @@ lineWidth: 2
 
 # Maximum distance (in blocks) between a trail marker and the camera (in the browser) for the trail marker to be displayed
 maxDistance: 1000
+
+
+# ----- Player Heatmaps -------------------------------------------------------------------------------
+# The heatmap overlay reuses the same sampled position points as the trails. Each overlay is drawn as a
+# grid of semi-transparent squares: areas a player spent more time in build up density and shade toward
+# heatmapMaxColor (red by default), while areas they only passed through stay near heatmapMinColor (green).
+# Heatmaps are nested the same way as trails (Player Heatmaps -> each player -> each session/marker) and,
+# like trails, honour the 'separateSessionTrails' and 'excludedMaps' settings above.
+
+# Name of the top-level heatmap marker set shown in BlueMap's layer menu.
+heatmapMarkerSetName: 'Player Heatmaps'
+
+# Whether the heatmap layers are visible by default. Defaults to false so heatmaps start toggled off
+# and viewers can enable them per player from the BlueMap layer menu.
+heatmapVisibleDefault: false
+
+# Whether the heatmap layers can be toggled in BlueMap's layer menu.
+heatmapMarkerSetToggleable: true
+
+# How far (in blocks) each sampled point spreads its "heat" outward. Larger values create bigger, smoother,
+# more overlapping blobs; smaller values keep the heat tight and concentrated around each point.
+heatmapRadius: 8
+
+# Shape of each point's heat footprint:
+#   'circle' - cells within heatmapRadius (round footprint, smoother-looking blobs)
+#   'square' - cells within an axis-aligned box of heatmapRadius (rectilinear footprint)
+# 'square' produces simpler, blockier region edges that merge into fewer markers, so it is lighter on the web
+# client; 'circle' looks rounder but creates more stair-stepped edges.
+heatmapRadiusShape: 'circle'
+
+# Resolution of the heatmap grid, in blocks. The world is divided into squares this many blocks on a side,
+# and each square is drawn as one colored marker. Smaller = finer/more detailed (and more markers to draw),
+# larger = chunkier but cheaper. Keeping this smaller than heatmapRadius produces smooth-looking gradients.
+heatmapCellSize: 4
+
+# Opacity of the heatmap squares, from 0.0 (fully transparent) to 1.0 (fully opaque).
+heatmapOpacity: 0.4
+
+# Gradient endpoints as rrggbb hex colors. Cells are colored by how their visit count RANKS among the
+# distinct visit counts in that heatmap (not by raw magnitude), so a single heavily-camped spot doesn't wash
+# everything else out to green. The least-visited cells use heatmapMinColor, the most-visited use
+# heatmapMaxColor, and the levels in between are spread evenly across the gradient.
+heatmapMinColor: '00ff00'
+heatmapMaxColor: 'ff0000'
+
+# Number of discrete color bands the gradient is split into. This is both a visual setting and the main
+# performance lever: cells are quantized into this many colors, and only cells of the EXACT same color can be
+# merged into a larger rectangle. Fewer bands -> neighbouring cells share a color more often -> far fewer
+# markers and a faster web client (but coarser, more stepped shading). More bands -> smoother gradient but
+# less merging. A value of 1 makes the whole heatmap a single color.
+heatmapColorLevels: 8
+
+# Maximum distance (in blocks) between a heatmap square and the camera (in the browser) for it to be displayed
+heatmapMaxDistance: 1000
+
+# Performance optimization: adjacent heatmap cells of the same color are merged into larger rectangles so the
+# web client draws far fewer markers (a small heatmapCellSize can otherwise create thousands of squares and lag
+# the browser). Same-colored cells are grouped into connected regions where neighbouring cells differ in height
+# by no more than this many blocks, and every rectangle in a region is drawn at the region's single average
+# height so they tile together seamlessly (without this they sit at slightly different heights and the merged
+# pieces still look like separate strips). Larger values merge across bigger height differences (better
+# performance, but can flatten gentle slopes onto one plane); 0 only merges cells that are at the same height.
+heatmapMergeHeightTolerance: 8

@@ -9,6 +9,11 @@ As the name suggests, this plugin creates BlueMap line markers visualizing recen
   
 In its default configuration, the plugin will show the path every player took within the last minute, sampling their positions once every second. It also generates a persistent random color for every player so you can tell their trails apart at a glance and recognize them even across rejoins.
 
+### Player Heatmaps
+In addition to trails, the plugin can display a separate top-level **Player Heatmaps** overlay built from the exact same sampled position data (so it stores nothing extra). Instead of lines, each player's recent positions are rendered as a grid of semi-transparent squares: areas a player lingered in build up more visits and shade toward red, while spots they only passed through stay green. Cells are colored by how their visit count ranks among the distinct counts (rather than by raw magnitude), so a single heavily-camped spot doesn't wash everything else out. Heatmaps are nested the same way as trails (Player Heatmaps → each player → each session) and start toggled off by default so viewers can enable them per player from BlueMap's layer menu.
+
+Trails and heatmaps are toggled independently in the config (`enablePlayerTrails` / `enablePlayerHeatmaps`), so you can run either one or both.
+
 ## Configuration
 The following aspects of this plugin are configurable:
 - Default color can be random or a predefined hex code
@@ -20,6 +25,7 @@ The following aspects of this plugin are configurable:
 - Optional permission for trail visibility
 - Fully customizable trail colors per player, manageable via permissions (e.g. 'bmtrails.color.red' for a red trail)
 - Excluded maps, that will never show any player's trail
+- Player Heatmaps overlay (enable/disable independently of trails) with configurable influence radius (circle or square footprint), grid cell size, opacity, and green→red gradient colors. Adjacent same-color cells are merged into a single polygon per region (with a configurable height tolerance) to keep the web client fast even at small cell sizes
 
 For more details on how to use each of these config settings, take a look at the [default config template](./src/main/resources/config.yml).
 

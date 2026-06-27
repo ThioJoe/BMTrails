@@ -81,6 +81,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
         public static final ConfigValue<Boolean> HEATMAP_SET_VISIBLE = new ConfigValue<>("heatmapVisibleDefault", false);
         public static final ConfigValue<Boolean> HEATMAP_SET_TOGGLEABLE = new ConfigValue<>("heatmapMarkerSetToggleable", true);
         public static final ConfigValue<Integer> HEATMAP_RADIUS = new ConfigValue<>("heatmapRadius", 8);
+        public static final ConfigValue<String> HEATMAP_RADIUS_SHAPE = new ConfigValue<>("heatmapRadiusShape", "circle");
         public static final ConfigValue<Integer> HEATMAP_CELL_SIZE = new ConfigValue<>("heatmapCellSize", 4);
         public static final ConfigValue<Double> HEATMAP_OPACITY = new ConfigValue<>("heatmapOpacity", 0.4);
         public static final ConfigValue<String> HEATMAP_MIN_COLOR = new ConfigValue<>("heatmapMinColor", "00ff00");
@@ -153,6 +154,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private boolean heatmapVisibleDefault;
     private boolean heatmapToggleable;
     private int heatmapRadius;
+    private boolean heatmapSquareRadius;
     private int heatmapCellSize;
     private double heatmapOpacity;
     private int[] heatmapMinRgb;
@@ -243,6 +245,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
         heatmapVisibleDefault = ConfigValue.HEATMAP_SET_VISIBLE.getValue();
         heatmapToggleable = ConfigValue.HEATMAP_SET_TOGGLEABLE.getValue();
         heatmapRadius = Math.max(1, ConfigValue.HEATMAP_RADIUS.getValue());
+        heatmapSquareRadius = "square".equalsIgnoreCase(String.valueOf(ConfigValue.HEATMAP_RADIUS_SHAPE.getValue()).trim());
         heatmapCellSize = Math.max(1, ConfigValue.HEATMAP_CELL_SIZE.getValue());
         heatmapOpacity = Math.min(1.0, Math.max(0.0, ConfigValue.HEATMAP_OPACITY.getValue()));
         heatmapMinRgb = parseRgb(ConfigValue.HEATMAP_MIN_COLOR.getValue(), new int[]{0x00, 0xff, 0x00});
@@ -701,7 +704,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
                 for(long cz = minCz; cz <= maxCz; cz++){
                     double centerZ = cz * (double) heatmapCellSize + heatmapCellSize / 2.0;
                     double dz = centerZ - pz;
-                    if(Math.sqrt(dx * dx + dz * dz) > heatmapRadius) continue;
+                    // "circle": Euclidean falloff (round footprint); "square": Chebyshev (axis-aligned box footprint,
+                    // which makes regions rectilinear and merge into much simpler polygons).
+                    if(heatmapSquareRadius ? (Math.abs(dx) > heatmapRadius || Math.abs(dz) > heatmapRadius)
+                            : (Math.sqrt(dx * dx + dz * dz) > heatmapRadius)) continue;
                     long key = packCell(cx, cz);
                     counts.computeIfAbsent(key, k -> new int[1])[0]++;
                     heights.computeIfAbsent(key, k -> new double[1])[0] += py;

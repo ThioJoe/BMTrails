@@ -25,7 +25,7 @@ The following aspects of this plugin are configurable:
 - Optional permission for trail visibility
 - Fully customizable trail colors per player, manageable via permissions (e.g. 'bmtrails.color.red' for a red trail)
 - Excluded maps, that will never show any player's trail
-- Player Heatmaps overlay (enable/disable independently of trails) with configurable influence radius, grid cell size, opacity, and green→red gradient colors. Adjacent same-color cells are merged into a single polygon per region (with a configurable height tolerance) to keep the web client fast even at small cell sizes
+- Player Heatmaps overlay (enable/disable independently of trails) with configurable influence radius (circle or square footprint), grid cell size, opacity, and green→red gradient colors. Adjacent same-color cells are merged into a single polygon per region (with a configurable height tolerance) to keep the web client fast even at small cell sizes
 
 For more details on how to use each of these config settings, take a look at the [default config template](./src/main/resources/config.yml).
 

@@ -112,6 +112,13 @@ heatmapMarkerSetToggleable: true
 # more overlapping blobs; smaller values keep the heat tight and concentrated around each point.
 heatmapRadius: 8
 
+# Shape of each point's heat footprint:
+#   'circle' - cells within heatmapRadius (round footprint, smoother-looking blobs)
+#   'square' - cells within an axis-aligned box of heatmapRadius (rectilinear footprint)
+# 'square' produces simpler, blockier region edges that merge into fewer markers, so it is lighter on the web
+# client; 'circle' looks rounder but creates more stair-stepped edges.
+heatmapRadiusShape: 'circle'
+
 # Resolution of the heatmap grid, in blocks. The world is divided into squares this many blocks on a side,
 # and each square is drawn as one colored marker. Smaller = finer/more detailed (and more markers to draw),
 # larger = chunkier but cheaper. Keeping this smaller than heatmapRadius produces smooth-looking gradients.

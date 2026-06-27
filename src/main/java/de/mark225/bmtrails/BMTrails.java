@@ -675,10 +675,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     private Map<String, ShapeMarker> buildHeatmapCells(Deque<Vector3d> points, String label, String prefix){
-        // Accumulate weighted density per grid cell. Each point spreads heat to all cells within heatmapRadius
-        // (linear falloff), so overlapping spreads from nearby points build up density -> hotter (redder) colour.
-        Map<Long, double[]> density = new HashMap<>();
-        double maxWeight = 0;
+        // Count how many sampled points fall within heatmapRadius of each grid cell. Overlapping coverage from nearby
+        // points raises a cell's hit count, so areas the player lingered in accumulate the highest counts.
+        Map<Long, int[]> counts = new HashMap<>();    // cell -> [hit count]
+        Map<Long, double[]> heights = new HashMap<>(); // cell -> [sum of contributing point Y]
         for(Vector3d point : points){
             double px = point.getX();
             double pz = point.getZ();
@@ -693,28 +693,34 @@ public final class BMTrails extends JavaPlugin implements Listener {
                 for(long cz = minCz; cz <= maxCz; cz++){
                     double centerZ = cz * (double) heatmapCellSize + heatmapCellSize / 2.0;
                     double dz = centerZ - pz;
-                    double dist = Math.sqrt(dx * dx + dz * dz);
-                    if(dist > heatmapRadius) continue;
-                    double weight = 1.0 - dist / heatmapRadius;
-                    double[] cell = density.computeIfAbsent(packCell(cx, cz), k -> new double[]{0, 0});
-                    cell[0] += weight;
-                    cell[1] += py * weight;
-                    if(cell[0] > maxWeight) maxWeight = cell[0];
+                    if(Math.sqrt(dx * dx + dz * dz) > heatmapRadius) continue;
+                    long key = packCell(cx, cz);
+                    counts.computeIfAbsent(key, k -> new int[1])[0]++;
+                    heights.computeIfAbsent(key, k -> new double[1])[0] += py;
                 }
             }
         }
         Map<String, ShapeMarker> cells = new HashMap<>();
-        if(maxWeight <= 0) return cells;
+        if(counts.isEmpty()) return cells;
+
+        // Colour by the RANK of each cell's hit count among the distinct counts, not the raw magnitude, so a single
+        // heavily-camped cell doesn't push everything else to the bottom (green). Cells that share a count share a
+        // colour, and the distinct counts are spread evenly from heatmapMinColor (lowest) to heatmapMaxColor (highest).
+        List<Integer> distinctCounts = counts.values().stream().map(c -> c[0]).distinct().sorted().toList();
+        Map<Integer, Integer> rankByCount = new HashMap<>();
+        for(int i = 0; i < distinctCounts.size(); i++) rankByCount.put(distinctCounts.get(i), i);
+        int levels = distinctCounts.size();
         int alpha = (int) Math.round(heatmapOpacity * 255.0);
-        for(Map.Entry<Long, double[]> entry : density.entrySet()){
+
+        for(Map.Entry<Long, int[]> entry : counts.entrySet()){
             long packed = entry.getKey();
-            double weight = entry.getValue()[0];
-            double t = weight / maxWeight;
+            int count = entry.getValue()[0];
+            double t = levels <= 1 ? 1.0 : (double) rankByCount.get(count) / (levels - 1);
             long cx = unpackX(packed);
             long cz = unpackZ(packed);
             double x1 = cx * (double) heatmapCellSize;
             double z1 = cz * (double) heatmapCellSize;
-            double y = entry.getValue()[1] / weight;
+            double y = heights.get(packed)[0] / count;
             Shape shape = Shape.createRect(x1, z1, x1 + heatmapCellSize, z1 + heatmapCellSize);
             var builder = ShapeMarker.builder()
                     .label(label)

@@ -120,8 +120,10 @@ heatmapCellSize: 4
 # Opacity of the heatmap squares, from 0.0 (fully transparent) to 1.0 (fully opaque).
 heatmapOpacity: 0.4
 
-# Gradient endpoints as rrggbb hex colors. Low-density areas use heatmapMinColor, the densest areas use
-# heatmapMaxColor, and everything in between is interpolated.
+# Gradient endpoints as rrggbb hex colors. Cells are colored by how their visit count RANKS among the
+# distinct visit counts in that heatmap (not by raw magnitude), so a single heavily-camped spot doesn't wash
+# everything else out to green. The least-visited cells use heatmapMinColor, the most-visited use
+# heatmapMaxColor, and the distinct count levels in between are spread evenly across the gradient.
 heatmapMinColor: '00ff00'
 heatmapMaxColor: 'ff0000'
 

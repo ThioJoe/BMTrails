@@ -5,9 +5,12 @@ import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
 import de.bluecolored.bluemap.api.BlueMapWorld;
 import de.bluecolored.bluemap.api.markers.LineMarker;
+import de.bluecolored.bluemap.api.markers.Marker;
 import de.bluecolored.bluemap.api.markers.MarkerSet;
+import de.bluecolored.bluemap.api.markers.ShapeMarker;
 import de.bluecolored.bluemap.api.math.Color;
 import de.bluecolored.bluemap.api.math.Line;
+import de.bluecolored.bluemap.api.math.Shape;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
@@ -65,6 +68,21 @@ public final class BMTrails extends JavaPlugin implements Listener {
         public static final ConfigValue<Boolean> SEPARATE_SESSION_TRAILS = new ConfigValue<>("separateSessionTrails", false);
         public static final ConfigValue<Map<String, String>> PLAYER_COLOR_OVERRIDES = new ConfigValue<>("playerColorOverrides", Map.of());
 
+        // Feature toggles for the two top-level overlays. Both reuse the same sampled point data.
+        public static final ConfigValue<Boolean> ENABLE_TRAILS = new ConfigValue<>("enablePlayerTrails", true);
+        public static final ConfigValue<Boolean> ENABLE_HEATMAPS = new ConfigValue<>("enablePlayerHeatmaps", true);
+
+        // Heatmap overlay settings.
+        public static final ConfigValue<String> HEATMAP_SET_NAME = new ConfigValue<>("heatmapMarkerSetName", "Player Heatmaps");
+        public static final ConfigValue<Boolean> HEATMAP_SET_VISIBLE = new ConfigValue<>("heatmapVisibleDefault", false);
+        public static final ConfigValue<Boolean> HEATMAP_SET_TOGGLEABLE = new ConfigValue<>("heatmapMarkerSetToggleable", true);
+        public static final ConfigValue<Integer> HEATMAP_RADIUS = new ConfigValue<>("heatmapRadius", 8);
+        public static final ConfigValue<Integer> HEATMAP_CELL_SIZE = new ConfigValue<>("heatmapCellSize", 4);
+        public static final ConfigValue<Double> HEATMAP_OPACITY = new ConfigValue<>("heatmapOpacity", 0.4);
+        public static final ConfigValue<String> HEATMAP_MIN_COLOR = new ConfigValue<>("heatmapMinColor", "00ff00");
+        public static final ConfigValue<String> HEATMAP_MAX_COLOR = new ConfigValue<>("heatmapMaxColor", "ff0000");
+        public static final ConfigValue<Integer> HEATMAP_MAX_DISTANCE = new ConfigValue<>("heatmapMaxDistance", 1000);
+
         public T getValue(){
             Object fromConfig = config.get(key, defaultValue);
             try{
@@ -89,6 +107,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private ConcurrentMap<UUID, TrailSession> trailSessions;
     private ConcurrentMap<UUID, Color> colorCache;
     private ConcurrentMap<UUID, MarkerSet> markerSets;
+    private ConcurrentMap<UUID, MarkerSet> heatmapMarkerSets;
     private ConcurrentMap<UUID, UUID> playerWorlds;
     private ConcurrentMap<UUID, String> nameCache;
 
@@ -121,6 +140,16 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private boolean markerSetToggleable;
     private boolean markerToggleOptionsSupported = true;
     private boolean nestedMarkerSetsSupported = true;
+    private boolean enableTrails;
+    private boolean enableHeatmaps;
+    private boolean heatmapVisibleDefault;
+    private boolean heatmapToggleable;
+    private int heatmapRadius;
+    private int heatmapCellSize;
+    private double heatmapOpacity;
+    private int[] heatmapMinRgb;
+    private int[] heatmapMaxRgb;
+    private int heatmapMaxDistance;
     private File historyFile;
 
 
@@ -157,6 +186,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
             blueMapAPI = api;
             getLogger().log(Level.INFO, "Enabling BMTrails");
             refreshConfig();
+            if(!enableTrails && !enableHeatmaps){
+                getLogger().log(Level.WARNING, "Both player trails and heatmaps are disabled in the config; BMTrails will not collect or display anything.");
+                return;
+            }
             createMarkerSets();
             registerPermissions();
             currentTrails = new ConcurrentHashMap<>();
@@ -193,6 +226,16 @@ public final class BMTrails extends JavaPlugin implements Listener {
         separateSessionTrails = ConfigValue.SEPARATE_SESSION_TRAILS.getValue();
         markerSetVisibleDefault = ConfigValue.MARKER_SET_VISIBLE.getValue();
         markerSetToggleable = ConfigValue.MARKER_SET_TOGGLEABLE.getValue();
+        enableTrails = ConfigValue.ENABLE_TRAILS.getValue();
+        enableHeatmaps = ConfigValue.ENABLE_HEATMAPS.getValue();
+        heatmapVisibleDefault = ConfigValue.HEATMAP_SET_VISIBLE.getValue();
+        heatmapToggleable = ConfigValue.HEATMAP_SET_TOGGLEABLE.getValue();
+        heatmapRadius = Math.max(1, ConfigValue.HEATMAP_RADIUS.getValue());
+        heatmapCellSize = Math.max(1, ConfigValue.HEATMAP_CELL_SIZE.getValue());
+        heatmapOpacity = Math.min(1.0, Math.max(0.0, ConfigValue.HEATMAP_OPACITY.getValue()));
+        heatmapMinRgb = parseRgb(ConfigValue.HEATMAP_MIN_COLOR.getValue(), new int[]{0x00, 0xff, 0x00});
+        heatmapMaxRgb = parseRgb(ConfigValue.HEATMAP_MAX_COLOR.getValue(), new int[]{0xff, 0x00, 0x00});
+        heatmapMaxDistance = ConfigValue.HEATMAP_MAX_DISTANCE.getValue();
         Pattern overridePattern = Pattern.compile("[a-zA-Z0-9]+:[0-9a-fA-F]{6}");
         colorPermissions = ConfigValue.PERMISSION_OVERRIDES.getValue().stream()
                 .filter(str -> overridePattern.matcher(str).matches())
@@ -214,12 +257,22 @@ public final class BMTrails extends JavaPlugin implements Listener {
         teleportDetectionThreshold = ConfigValue.TELEPORT_DETECTION_THRESHOLD.getValue();
     }
 
+    private int[] parseRgb(String hex, int[] fallback){
+        try{
+            int rgb = Integer.parseInt(hex, 16);
+            return new int[]{(rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff};
+        }catch(NumberFormatException e){
+            getLogger().log(Level.WARNING, "Invalid hex color '" + hex + "', using fallback");
+            return fallback;
+        }
+    }
+
     private void createMarkerSets(){
         List<String> excludedMaps = ConfigValue.EXCLUDED_MAPS.getValue();
         markerSets = new ConcurrentHashMap<>();
+        heatmapMarkerSets = new ConcurrentHashMap<>();
         String name = ConfigValue.MARKER_SET_NAME.getValue();
-        boolean visible = markerSetVisibleDefault;
-        boolean toggleable = markerSetToggleable;
+        String heatmapName = ConfigValue.HEATMAP_SET_NAME.getValue();
         for(World world : Bukkit.getWorlds()){
             BlueMapWorld bmw = blueMapAPI.getWorld(world.getUID()).orElse(null);
             if(bmw == null) continue;
@@ -227,9 +280,16 @@ public final class BMTrails extends JavaPlugin implements Listener {
                     .filter(map -> !excludedMaps.contains(map.getId()))
                     .toList();
             if(maps.isEmpty()) continue;
-            MarkerSet markerSet = createMarkerSet(name, visible, toggleable);
-            markerSets.put(world.getUID(), markerSet);
-            maps.forEach(map -> map.getMarkerSets().put("bmtrails_" + map.getId() + "_" + world.getName(), markerSet));
+            if(enableTrails){
+                MarkerSet markerSet = createMarkerSet(name, markerSetVisibleDefault, markerSetToggleable);
+                markerSets.put(world.getUID(), markerSet);
+                maps.forEach(map -> map.getMarkerSets().put("bmtrails_" + map.getId() + "_" + world.getName(), markerSet));
+            }
+            if(enableHeatmaps){
+                MarkerSet heatmapSet = createMarkerSet(heatmapName, heatmapVisibleDefault, heatmapToggleable);
+                heatmapMarkerSets.put(world.getUID(), heatmapSet);
+                maps.forEach(map -> map.getMarkerSets().put("bmheatmap_" + map.getId() + "_" + world.getName(), heatmapSet));
+            }
         }
     }
 
@@ -247,7 +307,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
         Map<UUID, Location> locations = Bukkit.getOnlinePlayers().stream()
                 .filter(player -> !permissionFilter || player.hasPermission(PERM_VISIBLE))
                 .filter(player -> blueMapAPI.getWebApp().getPlayerVisibility(player.getUniqueId()))
-                .filter(player -> markerSets.containsKey(player.getWorld().getUID()))
+                .filter(player -> isTrackedWorld(player.getWorld().getUID()))
                 .collect(Collectors.toMap(player -> player.getUniqueId(), player -> player.getLocation()));
         if(System.currentTimeMillis() - lastCacheRefresh >= 5000)
             refreshCaches();
@@ -330,6 +390,11 @@ public final class BMTrails extends JavaPlugin implements Listener {
 
     private void asyncTrailTask(){
         lastUpdate = System.currentTimeMillis();
+        if(enableTrails) buildTrails();
+        if(enableHeatmaps) buildHeatmaps();
+    }
+
+    private void buildTrails(){
         cleanObsoleteMarkers();
         if(currentTrails.isEmpty()) return;
         if(separateSessionTrails){
@@ -429,6 +494,219 @@ public final class BMTrails extends JavaPlugin implements Listener {
         }
         if(!currentTrails.containsKey(uuid)) return true;
         return !world.equals(playerWorlds.get(uuid));
+    }
+
+    private boolean isTrackedWorld(UUID world){
+        return (markerSets != null && markerSets.containsKey(world))
+                || (heatmapMarkerSets != null && heatmapMarkerSets.containsKey(world));
+    }
+
+    // ----- Heatmaps -------------------------------------------------------------------------------------------------
+
+    private void buildHeatmaps(){
+        cleanObsoleteHeatmaps();
+        if(currentTrails.isEmpty()) return;
+        if(separateSessionTrails){
+            for(TrailSession session : trailSessions.values()){
+                MarkerSet root = heatmapMarkerSets.get(session.world);
+                if(root == null || session.points.size() <= 1) continue;
+                renderHeatmapOverlay(root, session.player, session.id, session.points);
+            }
+            return;
+        }
+        for(Map.Entry<UUID, ConcurrentLinkedDeque<Vector3d>> entry : currentTrails.entrySet()){
+            UUID world = playerWorlds.get(entry.getKey());
+            if(world == null) continue;
+            MarkerSet root = heatmapMarkerSets.get(world);
+            if(root == null) continue;
+            if(entry.getValue().size() <= 1) continue;
+            renderHeatmapOverlay(root, entry.getKey(), null, entry.getValue());
+        }
+    }
+
+    /**
+     * Renders a single player's (or session's) heatmap as a grid of semi-transparent {@link ShapeMarker} squares,
+     * nested as Player Heatmaps -> player -> (session) just like the trail overlays. Each rebuild fully replaces the
+     * previous cells for that overlay. When the running BlueMap build does not support nested marker sets, the cells
+     * are flattened into the world root set with a player/session-qualified key prefix instead.
+     */
+    private void renderHeatmapOverlay(MarkerSet root, UUID player, UUID sessionId, Deque<Vector3d> points){
+        MarkerSet leaf;
+        String prefix;
+        MarkerSet playerSet = heatmapPlayerSet(root, player);
+        if(playerSet == null){
+            // Nested marker sets unsupported: flatten everything into the world root set.
+            leaf = root;
+            prefix = player + (sessionId != null ? ":" + sessionId : "") + ":";
+        }else if(sessionId != null){
+            leaf = heatmapSessionSet(playerSet, sessionId);
+            // heatmapSessionSet falls back to the player set if it can't nest a third level.
+            prefix = leaf == playerSet ? sessionId + ":" : "";
+        }else{
+            leaf = playerSet;
+            prefix = "";
+        }
+        String label = sessionId != null ? heatmapSessionLabel(player, sessionId) : resolvePlayerName(player);
+        Map<String, ShapeMarker> cells = buildHeatmapCells(points, label, prefix);
+        Map<String, Marker> markers = leaf.getMarkers();
+        if(prefix.isEmpty()){
+            markers.clear();
+        }else{
+            markers.keySet().removeIf(key -> key.startsWith(prefix));
+        }
+        markers.putAll(cells);
+    }
+
+    private Map<String, ShapeMarker> buildHeatmapCells(Deque<Vector3d> points, String label, String prefix){
+        // Accumulate weighted density per grid cell. Each point spreads heat to all cells within heatmapRadius
+        // (linear falloff), so overlapping spreads from nearby points build up density -> hotter (redder) colour.
+        Map<Long, double[]> density = new HashMap<>();
+        double maxWeight = 0;
+        for(Vector3d point : points){
+            double px = point.getX();
+            double pz = point.getZ();
+            double py = point.getY();
+            long minCx = cellIndex(px - heatmapRadius);
+            long maxCx = cellIndex(px + heatmapRadius);
+            long minCz = cellIndex(pz - heatmapRadius);
+            long maxCz = cellIndex(pz + heatmapRadius);
+            for(long cx = minCx; cx <= maxCx; cx++){
+                double centerX = cx * (double) heatmapCellSize + heatmapCellSize / 2.0;
+                double dx = centerX - px;
+                for(long cz = minCz; cz <= maxCz; cz++){
+                    double centerZ = cz * (double) heatmapCellSize + heatmapCellSize / 2.0;
+                    double dz = centerZ - pz;
+                    double dist = Math.sqrt(dx * dx + dz * dz);
+                    if(dist > heatmapRadius) continue;
+                    double weight = 1.0 - dist / heatmapRadius;
+                    double[] cell = density.computeIfAbsent(packCell(cx, cz), k -> new double[]{0, 0});
+                    cell[0] += weight;
+                    cell[1] += py * weight;
+                    if(cell[0] > maxWeight) maxWeight = cell[0];
+                }
+            }
+        }
+        Map<String, ShapeMarker> cells = new HashMap<>();
+        if(maxWeight <= 0) return cells;
+        int alpha = (int) Math.round(heatmapOpacity * 255.0);
+        for(Map.Entry<Long, double[]> entry : density.entrySet()){
+            long packed = entry.getKey();
+            double weight = entry.getValue()[0];
+            double t = weight / maxWeight;
+            long cx = unpackX(packed);
+            long cz = unpackZ(packed);
+            double x1 = cx * (double) heatmapCellSize;
+            double z1 = cz * (double) heatmapCellSize;
+            double y = entry.getValue()[1] / weight;
+            Shape shape = Shape.createRect(x1, z1, x1 + heatmapCellSize, z1 + heatmapCellSize);
+            ShapeMarker marker = ShapeMarker.builder()
+                    .label(label)
+                    .detail(label)
+                    .shape(shape, (float) y)
+                    .position(x1 + heatmapCellSize / 2.0, y, z1 + heatmapCellSize / 2.0)
+                    .fillColor(heatColor(t, alpha))
+                    .lineColor(new Color(0x00000000))
+                    .lineWidth(1)
+                    .depthTestEnabled(false)
+                    .maxDistance(heatmapMaxDistance)
+                    .build();
+            cells.put(prefix + cx + "_" + cz, marker);
+        }
+        return cells;
+    }
+
+    private long cellIndex(double coordinate){
+        return (long) Math.floor(coordinate / heatmapCellSize);
+    }
+
+    private long packCell(long cx, long cz){
+        return (cx << 32) ^ (cz & 0xffffffffL);
+    }
+
+    private long unpackX(long packed){
+        return packed >> 32;
+    }
+
+    private long unpackZ(long packed){
+        return (int) (packed & 0xffffffffL);
+    }
+
+    private Color heatColor(double t, int alpha){
+        t = Math.min(1.0, Math.max(0.0, t));
+        int r = (int) Math.round(heatmapMinRgb[0] + (heatmapMaxRgb[0] - heatmapMinRgb[0]) * t);
+        int g = (int) Math.round(heatmapMinRgb[1] + (heatmapMaxRgb[1] - heatmapMinRgb[1]) * t);
+        int b = (int) Math.round(heatmapMinRgb[2] + (heatmapMaxRgb[2] - heatmapMinRgb[2]) * t);
+        return new Color((alpha << 24) | (r << 16) | (g << 8) | b);
+    }
+
+    private MarkerSet heatmapPlayerSet(MarkerSet root, UUID player){
+        Map<String, MarkerSet> children = childMarkerSets(root);
+        if(children == null) return null;
+        String label = resolvePlayerName(player);
+        MarkerSet set = children.computeIfAbsent("player_" + player, key ->
+                createMarkerSet(label, heatmapVisibleDefault, heatmapToggleable));
+        if(!label.equals(player.toString()) && !label.equals(set.getLabel()))
+            set.setLabel(label);
+        return set;
+    }
+
+    private MarkerSet heatmapSessionSet(MarkerSet playerSet, UUID sessionId){
+        Map<String, MarkerSet> children = childMarkerSets(playerSet);
+        if(children == null) return playerSet;
+        TrailSession session = trailSessions.get(sessionId);
+        String label = session != null ? sessionTimestampLabel(session) : sessionId.toString();
+        MarkerSet set = children.computeIfAbsent("session_" + sessionId, key ->
+                createMarkerSet(label, heatmapVisibleDefault, heatmapToggleable));
+        if(session != null && !label.equals(set.getLabel()))
+            set.setLabel(label);
+        return set;
+    }
+
+    private String heatmapSessionLabel(UUID player, UUID sessionId){
+        TrailSession session = trailSessions.get(sessionId);
+        return session != null ? sessionLabel(session) : resolvePlayerName(player);
+    }
+
+    private void cleanObsoleteHeatmaps(){
+        for(Map.Entry<UUID, MarkerSet> entry : heatmapMarkerSets.entrySet()){
+            cleanObsoleteHeatmaps(entry.getValue(), entry.getKey());
+        }
+    }
+
+    private void cleanObsoleteHeatmaps(MarkerSet root, UUID world){
+        Map<String, MarkerSet> players = childMarkerSets(root);
+        if(players == null){
+            // Flattened fallback: cell keys are "<player>[:<session>]:<cx>_<cz>".
+            root.getMarkers().keySet().removeIf(key -> shouldRemoveMarker(key, world));
+            return;
+        }
+        players.entrySet().removeIf(playerEntry -> {
+            UUID player = parseSetId(playerEntry.getKey(), "player_");
+            if(player == null) return true;
+            MarkerSet playerSet = playerEntry.getValue();
+            if(separateSessionTrails){
+                Map<String, MarkerSet> sessions = childMarkerSets(playerSet);
+                if(sessions != null){
+                    sessions.entrySet().removeIf(sessionEntry -> {
+                        UUID sessionId = parseSetId(sessionEntry.getKey(), "session_");
+                        TrailSession session = sessionId == null ? null : trailSessions.get(sessionId);
+                        return session == null || !world.equals(session.world);
+                    });
+                    return sessions.isEmpty() && playerSet.getMarkers().isEmpty();
+                }
+                return playerSet.getMarkers().isEmpty();
+            }
+            return !currentTrails.containsKey(player) || !world.equals(playerWorlds.get(player));
+        });
+    }
+
+    private UUID parseSetId(String key, String expectedPrefix){
+        if(!key.startsWith(expectedPrefix)) return null;
+        try{
+            return UUID.fromString(key.substring(expectedPrefix.length()));
+        }catch(IllegalArgumentException e){
+            return null;
+        }
     }
 
     @EventHandler

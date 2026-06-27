@@ -2,6 +2,14 @@
 #
 # This config is reloaded automatically on every /bluemap reload
 
+# BMTrails can display two separate top-level overlays in BlueMap, both built from the same sampled
+# position data (so enabling heatmaps does not store any extra data):
+#   - Player Trails:   line markers showing each player's recent path
+#   - Player Heatmaps: semi-transparent squares shading where players spent the most time
+# Enable or disable each overlay independently. Disabling both makes the plugin do nothing.
+enablePlayerTrails: true
+enablePlayerHeatmaps: true
+
 markerSetName: 'Player Trails'
 markerSetVisibleDefault: true
 markerSetToggleable: true
@@ -81,3 +89,41 @@ lineWidth: 2
 
 # Maximum distance (in blocks) between a trail marker and the camera (in the browser) for the trail marker to be displayed
 maxDistance: 1000
+
+
+# ----- Player Heatmaps -------------------------------------------------------------------------------
+# The heatmap overlay reuses the same sampled position points as the trails. Each overlay is drawn as a
+# grid of semi-transparent squares: areas a player spent more time in build up density and shade toward
+# heatmapMaxColor (red by default), while areas they only passed through stay near heatmapMinColor (green).
+# Heatmaps are nested the same way as trails (Player Heatmaps -> each player -> each session/marker) and,
+# like trails, honour the 'separateSessionTrails' and 'excludedMaps' settings above.
+
+# Name of the top-level heatmap marker set shown in BlueMap's layer menu.
+heatmapMarkerSetName: 'Player Heatmaps'
+
+# Whether the heatmap layers are visible by default. Defaults to false so heatmaps start toggled off
+# and viewers can enable them per player from the BlueMap layer menu.
+heatmapVisibleDefault: false
+
+# Whether the heatmap layers can be toggled in BlueMap's layer menu.
+heatmapMarkerSetToggleable: true
+
+# How far (in blocks) each sampled point spreads its "heat" outward. Larger values create bigger, smoother,
+# more overlapping blobs; smaller values keep the heat tight and concentrated around each point.
+heatmapRadius: 8
+
+# Resolution of the heatmap grid, in blocks. The world is divided into squares this many blocks on a side,
+# and each square is drawn as one colored marker. Smaller = finer/more detailed (and more markers to draw),
+# larger = chunkier but cheaper. Keeping this smaller than heatmapRadius produces smooth-looking gradients.
+heatmapCellSize: 4
+
+# Opacity of the heatmap squares, from 0.0 (fully transparent) to 1.0 (fully opaque).
+heatmapOpacity: 0.4
+
+# Gradient endpoints as rrggbb hex colors. Low-density areas use heatmapMinColor, the densest areas use
+# heatmapMaxColor, and everything in between is interpolated.
+heatmapMinColor: '00ff00'
+heatmapMaxColor: 'ff0000'
+
+# Maximum distance (in blocks) between a heatmap square and the camera (in the browser) for it to be displayed
+heatmapMaxDistance: 1000

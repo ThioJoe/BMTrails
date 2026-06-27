@@ -4,7 +4,14 @@ on:
   push:
     branches:
       - '**'
+  pull_request:
   workflow_dispatch:
+
+# Least-privilege token so the build runs even on forks where the default
+# GITHUB_TOKEN permissions are restricted. The build only needs to read the
+# repo; artifact upload does not require any additional permissions.
+permissions:
+  contents: read
 
 jobs:
   build:

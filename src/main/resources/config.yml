@@ -123,9 +123,16 @@ heatmapOpacity: 0.4
 # Gradient endpoints as rrggbb hex colors. Cells are colored by how their visit count RANKS among the
 # distinct visit counts in that heatmap (not by raw magnitude), so a single heavily-camped spot doesn't wash
 # everything else out to green. The least-visited cells use heatmapMinColor, the most-visited use
-# heatmapMaxColor, and the distinct count levels in between are spread evenly across the gradient.
+# heatmapMaxColor, and the levels in between are spread evenly across the gradient.
 heatmapMinColor: '00ff00'
 heatmapMaxColor: 'ff0000'
+
+# Number of discrete color bands the gradient is split into. This is both a visual setting and the main
+# performance lever: cells are quantized into this many colors, and only cells of the EXACT same color can be
+# merged into a larger rectangle. Fewer bands -> neighbouring cells share a color more often -> far fewer
+# markers and a faster web client (but coarser, more stepped shading). More bands -> smoother gradient but
+# less merging. A value of 1 makes the whole heatmap a single color.
+heatmapColorLevels: 8
 
 # Maximum distance (in blocks) between a heatmap square and the camera (in the browser) for it to be displayed
 heatmapMaxDistance: 1000

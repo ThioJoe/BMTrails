@@ -86,6 +86,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
         public static final ConfigValue<String> HEATMAP_MAX_COLOR = new ConfigValue<>("heatmapMaxColor", "ff0000");
         public static final ConfigValue<Integer> HEATMAP_MAX_DISTANCE = new ConfigValue<>("heatmapMaxDistance", 1000);
         public static final ConfigValue<Integer> HEATMAP_MERGE_HEIGHT_TOLERANCE = new ConfigValue<>("heatmapMergeHeightTolerance", 8);
+        public static final ConfigValue<Integer> HEATMAP_COLOR_LEVELS = new ConfigValue<>("heatmapColorLevels", 8);
 
         public T getValue(){
             Object fromConfig = config.get(key, defaultValue);
@@ -156,6 +157,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private int[] heatmapMaxRgb;
     private int heatmapMaxDistance;
     private int heatmapMergeHeightTolerance;
+    private int heatmapColorLevels;
     private File historyFile;
 
 
@@ -245,6 +247,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
         heatmapMaxRgb = parseRgb(ConfigValue.HEATMAP_MAX_COLOR.getValue(), new int[]{0xff, 0x00, 0x00});
         heatmapMaxDistance = ConfigValue.HEATMAP_MAX_DISTANCE.getValue();
         heatmapMergeHeightTolerance = Math.max(0, ConfigValue.HEATMAP_MERGE_HEIGHT_TOLERANCE.getValue());
+        heatmapColorLevels = Math.max(1, ConfigValue.HEATMAP_COLOR_LEVELS.getValue());
         Pattern overridePattern = Pattern.compile("[a-zA-Z0-9]+:[0-9a-fA-F]{6}");
         colorPermissions = ConfigValue.PERMISSION_OVERRIDES.getValue().stream()
                 .filter(str -> overridePattern.matcher(str).matches())
@@ -707,32 +710,38 @@ public final class BMTrails extends JavaPlugin implements Listener {
         if(counts.isEmpty()) return cells;
 
         // Colour by the RANK of each cell's hit count among the distinct counts, not the raw magnitude, so a single
-        // heavily-camped cell doesn't push everything else to the bottom (green). Cells that share a count share a
-        // colour, and the distinct counts are spread evenly from heatmapMinColor (lowest) to heatmapMaxColor (highest).
+        // heavily-camped cell doesn't push everything else to the bottom (green).
         List<Integer> distinctCounts = counts.values().stream().map(c -> c[0]).distinct().sorted().toList();
         Map<Integer, Integer> rankByCount = new HashMap<>();
         for(int i = 0; i < distinctCounts.size(); i++) rankByCount.put(distinctCounts.get(i), i);
         int levels = distinctCounts.size();
         int alpha = (int) Math.round(heatmapOpacity * 255.0);
 
-        // Pre-compute each occupied cell's colour level (dense rank) and average height.
+        // Quantise each cell's rank into a fixed number of colour bands (heatmapColorLevels) and average height.
+        // Without bucketing, the dense rank produces almost as many distinct colours as there are cells, so
+        // visually-identical neighbours rarely share an EXACT colour and therefore can't be merged below. Grouping
+        // into a handful of bands lets large same-colour regions collapse into a few rectangles while keeping the
+        // rank-based (not magnitude-based) shading.
+        int bands = Math.max(1, heatmapColorLevels);
         Map<Long, Double> heightByCell = new HashMap<>();
-        Map<Integer, List<Long>> cellsByLevel = new HashMap<>();
+        Map<Integer, List<Long>> cellsByBand = new HashMap<>();
         for(Map.Entry<Long, int[]> entry : counts.entrySet()){
             long key = entry.getKey();
             int count = entry.getValue()[0];
             heightByCell.put(key, heights.get(key)[0] / count);
-            cellsByLevel.computeIfAbsent(rankByCount.get(count), k -> new ArrayList<>()).add(key);
+            double rank = levels <= 1 ? 1.0 : (double) rankByCount.get(count) / (levels - 1);
+            int band = bands <= 1 ? 0 : (int) Math.round(rank * (bands - 1));
+            cellsByBand.computeIfAbsent(band, k -> new ArrayList<>()).add(key);
         }
 
         // Merge contiguous same-colour cells into maximal rectangles to cut the marker count (BlueMap renders one
         // polygon per marker, so thousands of tiny cells lag the web client). Cells only merge while their height
         // stays within heatmapMergeHeightTolerance of the rectangle's seed cell, so a tall structure isn't flattened
         // onto the ground; the merged rectangle is drawn at its cells' average height.
-        for(Map.Entry<Integer, List<Long>> levelEntry : cellsByLevel.entrySet()){
-            double t = levels <= 1 ? 1.0 : (double) levelEntry.getKey() / (levels - 1);
-            Set<Long> remaining = new HashSet<>(levelEntry.getValue());
-            List<Long> ordered = levelEntry.getValue().stream()
+        for(Map.Entry<Integer, List<Long>> bandEntry : cellsByBand.entrySet()){
+            double t = bands <= 1 ? 1.0 : (double) bandEntry.getKey() / (bands - 1);
+            Set<Long> remaining = new HashSet<>(bandEntry.getValue());
+            List<Long> ordered = bandEntry.getValue().stream()
                     .sorted(Comparator.<Long>comparingLong(l -> unpackZ(l)).thenComparingLong(l -> unpackX(l)))
                     .toList();
             for(long seed : ordered){

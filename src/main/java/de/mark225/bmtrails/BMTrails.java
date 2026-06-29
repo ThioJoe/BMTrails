@@ -109,6 +109,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private static final DateTimeFormatter SESSION_LABEL_FORMAT = DateTimeFormatter.ofPattern("M/d/yy h:mma", Locale.ROOT)
             .withZone(ZoneId.systemDefault());
 
+    // Separator between a trail's base marker key and its per-segment index (a teleport splits one trail into
+    // several line segments). '#' never appears in a UUID, so it can't collide with the player/session UUID parts.
+    private static final String SEGMENT_KEY_SEPARATOR = "#";
+
     private ConcurrentMap<UUID, ConcurrentLinkedDeque<Vector3d>> currentTrails;
     private ConcurrentMap<UUID, Long> trailLastSeen;
     private ConcurrentMap<UUID, UUID> activeSessionIds;
@@ -489,10 +493,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
             }else {
                 Deque<Vector3d> deque = currentTrails.computeIfAbsent(uuid, key -> new ConcurrentLinkedDeque<>());
 
-                if(!deque.isEmpty() && deque.peekFirst().distance(vector3d) > teleportDetectionThreshold){
-                    deque.clear();
-                    session.points.clear();
-                }
+                // Teleports (jumps larger than teleportDetectionThreshold) are no longer deleted here - all
+                // movement is kept as part of the same session and persisted. The visual line is instead split
+                // at these jumps when the markers are rendered (see splitIntoSegments / putTrailSegments), so a
+                // teleport breaks the drawn line without discarding the player's earlier path or starting a new session.
 
                 if(!deque.isEmpty() && sameCoordinates(deque.peekFirst(), vector3d)){
                     session.world = world;
@@ -533,7 +537,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
                 if(rootMarkerSet == null || session.points.size() <= 1) continue;
                 MarkerSet sessionMarkerSet = markerSetForSession(rootMarkerSet, session);
                 String label = sessionMarkerSet == rootMarkerSet ? sessionLabel(session) : sessionTimestampLabel(session);
-                sessionMarkerSet.put(markerKey(session), createMarker(session.player, session.points, label));
+                putTrailSegments(sessionMarkerSet, markerKey(session), session.player, session.points, label);
             }
             return;
         }
@@ -543,14 +547,58 @@ public final class BMTrails extends JavaPlugin implements Listener {
             MarkerSet markerSet = markerSets.get(world);
             if(markerSet == null) continue;
             if(entry.getValue().size() > 1) {
-                markerSet.put(entry.getKey().toString(), createMarker(entry.getKey(), entry.getValue(), null));
+                putTrailSegments(markerSet, entry.getKey().toString(), entry.getKey(), entry.getValue(), null);
             }else{
-                markerSet.remove(entry.getKey().toString());
+                removeTrailSegments(markerSet, entry.getKey().toString());
             }
         }
     }
 
-    private LineMarker createMarker(UUID player, Deque<Vector3d> points, String labelOverride){
+    /**
+     * Splits a player's path into contiguous segments, breaking it wherever two consecutive points are farther
+     * apart than {@link #teleportDetectionThreshold} (i.e. a teleport / large jump). All points are kept - this only
+     * decides where the drawn line should have a visual gap - so the underlying session and its history stay intact.
+     */
+    private List<List<Vector3d>> splitIntoSegments(Collection<Vector3d> points){
+        List<List<Vector3d>> segments = new ArrayList<>();
+        List<Vector3d> current = new ArrayList<>();
+        Vector3d previous = null;
+        for(Vector3d point : points){
+            if(previous != null && previous.distance(point) > teleportDetectionThreshold){
+                segments.add(current);
+                current = new ArrayList<>();
+            }
+            current.add(point);
+            previous = point;
+        }
+        if(!current.isEmpty()) segments.add(current);
+        return segments;
+    }
+
+    /**
+     * Renders a single trail as one line marker per contiguous segment (segments are split at teleports by
+     * {@link #splitIntoSegments}). Each segment marker is keyed {@code baseKey + SEGMENT_KEY_SEPARATOR + index}. Any
+     * markers from a previous render of this same trail are removed first so a shrinking segment count never leaves
+     * stale lines behind.
+     */
+    private void putTrailSegments(MarkerSet markerSet, String baseKey, UUID player, Collection<Vector3d> points, String label){
+        removeTrailSegments(markerSet, baseKey);
+        List<List<Vector3d>> segments = splitIntoSegments(points);
+        int index = 0;
+        for(List<Vector3d> segment : segments){
+            if(segment.size() > 1)
+                markerSet.put(baseKey + SEGMENT_KEY_SEPARATOR + index, createMarker(player, segment, label));
+            index++;
+        }
+    }
+
+    /** Removes every line marker belonging to a trail (its per-segment keys, plus any legacy single-marker key). */
+    private void removeTrailSegments(MarkerSet markerSet, String baseKey){
+        String segmentPrefix = baseKey + SEGMENT_KEY_SEPARATOR;
+        markerSet.getMarkers().keySet().removeIf(key -> key.equals(baseKey) || key.startsWith(segmentPrefix));
+    }
+
+    private LineMarker createMarker(UUID player, Collection<Vector3d> points, String labelOverride){
         Color color = trailColor(player);
         String label = labelOverride != null ? labelOverride : displayNamePreset.replace("%player%", resolvePlayerName(player));
         Line line = new Line(points.toArray(Vector3d[]::new));
@@ -1023,6 +1071,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     private UUID markerPlayerId(String key) {
+        key = stripSegmentSuffix(key);
         try{
             return UUID.fromString(key.contains(":") ? key.substring(0, key.indexOf(':')) : key);
         }catch(IllegalArgumentException e){
@@ -1031,12 +1080,19 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     private UUID markerSessionId(String key) {
+        key = stripSegmentSuffix(key);
         if(!key.contains(":")) return null;
         try{
             return UUID.fromString(key.substring(key.indexOf(':') + 1));
         }catch(IllegalArgumentException e){
             return null;
         }
+    }
+
+    /** Strips the trailing {@code SEGMENT_KEY_SEPARATOR + index} from a marker key so the UUID parts can be parsed. */
+    private String stripSegmentSuffix(String key) {
+        int separator = key.indexOf(SEGMENT_KEY_SEPARATOR);
+        return separator < 0 ? key : key.substring(0, separator);
     }
 
     private String sessionLabel(TrailSession session) {

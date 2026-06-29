@@ -153,6 +153,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private boolean markerToggleOptionsSupported = true;
     private boolean markerListedSupported = true;
     private boolean nestedMarkerSetsSupported = true;
+    private boolean markerSetSortingSupported = true;
     private boolean enableTrails;
     private boolean enableHeatmaps;
     private boolean heatmapVisibleDefault;
@@ -570,13 +571,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
         // Keys stay fully qualified (player[:session]#index) regardless of which set they land in, so the recursive
         // cleanObsoleteMarkers / shouldRemoveMarker logic can still resolve the player & session from any segment key.
         String baseKey = sessionId != null ? player + ":" + sessionId : player.toString();
-        putTrailSegments(leaf, baseKey, player, points, trailMarkerLabel(player, sessionId));
-    }
-
-    private String trailMarkerLabel(UUID player, UUID sessionId){
-        if(sessionId == null) return null; // null -> createMarker falls back to the displayName preset
-        TrailSession session = trailSessions.get(sessionId);
-        return session != null ? sessionLabel(session) : resolvePlayerName(player);
+        putTrailSegments(leaf, baseKey, player, points);
     }
 
     /**
@@ -604,15 +599,18 @@ public final class BMTrails extends JavaPlugin implements Listener {
      * Renders one trail as a line marker per contiguous segment into {@code markerSet} (its leaf set). Each segment
      * marker is keyed {@code baseKey + SEGMENT_KEY_SEPARATOR + index} and is unlisted / non-toggleable so the segments
      * of a single trail behave as one grouped overlay rather than separate toggles. Any markers from a previous render
-     * of this same trail are removed first so a shrinking segment count never leaves stale lines behind.
+     * of this same trail are removed first so a shrinking segment count never leaves stale lines behind. Each rendered
+     * segment is labelled "Segment 1", "Segment 2", ... (numbered contiguously over the segments actually drawn) rather
+     * than inheriting the trail/session label, so hovering a teleport-split piece identifies which segment it is.
      */
-    private void putTrailSegments(MarkerSet markerSet, String baseKey, UUID player, Collection<Vector3d> points, String label){
+    private void putTrailSegments(MarkerSet markerSet, String baseKey, UUID player, Collection<Vector3d> points){
         removeTrailSegments(markerSet, baseKey);
         List<List<Vector3d>> segments = splitIntoSegments(points);
         int index = 0;
+        int segmentNumber = 0;
         for(List<Vector3d> segment : segments){
             if(segment.size() > 1)
-                markerSet.put(baseKey + SEGMENT_KEY_SEPARATOR + index, createMarker(player, segment, label));
+                markerSet.put(baseKey + SEGMENT_KEY_SEPARATOR + index, createMarker(player, segment, "Segment " + (++segmentNumber)));
             index++;
         }
     }
@@ -1029,6 +1027,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
                 createMarkerSet(label, heatmapVisibleDefault, heatmapToggleable));
         if(session != null && !label.equals(set.getLabel()))
             set.setLabel(label);
+        if(session != null) applyMarkerSetSorting(set, sessionSorting(session.player, sessionId));
         return set;
     }
 
@@ -1129,6 +1128,24 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     /**
+     * Sorting value for a player's session marker set: the most recently started session sorts first (0), the next
+     * most recent 1, and so on, so newer sessions appear at the top of the menu (BlueMap orders sets by ascending
+     * sorting value). Ranked only among that same player's sessions, by counting how many of their sessions started
+     * more recently than this one. Ties on start time fall back to a stable comparison of the session ids.
+     */
+    private int sessionSorting(UUID player, UUID sessionId) {
+        TrailSession self = trailSessions.get(sessionId);
+        if(self == null) return 0;
+        int rank = 0;
+        for(TrailSession other : trailSessions.values()){
+            if(other.id.equals(sessionId) || !other.player.equals(player)) continue;
+            if(other.startedAt > self.startedAt
+                    || (other.startedAt == self.startedAt && other.id.compareTo(sessionId) > 0)) rank++;
+        }
+        return rank;
+    }
+
+    /**
      * Resolves a display name for the given player. The live {@link #nameCache} only contains currently-online
      * players, so for offline players (e.g. ones restored from persisted history) we fall back to the server's
      * cached offline-player name, and only use the raw UUID as a last resort.
@@ -1175,6 +1192,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
                 createMarkerSet(label, markerSetVisibleDefault, markerSetToggleable));
         if(session != null && !label.equals(set.getLabel()))
             set.setLabel(label);
+        if(session != null) applyMarkerSetSorting(set, sessionSorting(session.player, sessionId));
         return set;
     }
 
@@ -1219,6 +1237,23 @@ public final class BMTrails extends JavaPlugin implements Listener {
             getLogger().log(Level.WARNING, "Unable to apply marker listed option", e);
         }
         return builder;
+    }
+
+    /**
+     * Sets a marker set's sorting value (lower values appear first in BlueMap's menu). Done reflectively because the
+     * {@code sorting} property only exists on newer BlueMap builds than this plugin compiles against; on older builds
+     * the method is absent and we simply skip it (the sets just keep their default order).
+     */
+    private void applyMarkerSetSorting(MarkerSet markerSet, int sorting) {
+        if(!markerSetSortingSupported) return;
+        try{
+            Method method = markerSet.getClass().getMethod("setSorting", int.class);
+            method.invoke(markerSet, sorting);
+        }catch(NoSuchMethodException e){
+            markerSetSortingSupported = false;
+        }catch(IllegalAccessException | InvocationTargetException e){
+            getLogger().log(Level.WARNING, "Unable to apply marker-set sorting", e);
+        }
     }
 
     private Map<String, MarkerSet> childMarkerSets(MarkerSet markerSet) {

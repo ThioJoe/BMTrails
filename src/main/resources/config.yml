@@ -71,9 +71,12 @@ trailPointsMax: 60
 # The default trail would amount to 20 ticks/point * 60 points = 1200 ticks = 1 minute
 # So with default settings, each trail represents the last minute of each player's movement
 
-# If a player moves more than the specified amount of blocks between two trail points, the trail is reset to prevent long lines spanning the entire map when a player teleports
+# If a player moves more than the specified amount of blocks between two trail points, the drawn line is broken
+# (split into separate segments) at that jump to prevent long lines spanning the entire map when a player teleports.
+# The earlier movement is NOT discarded - it stays part of the same session/trail, the line just doesn't visually
+# connect across the teleport.
 # Make sure to tweak this, so it isn't possible to travel this distance within a single samplingInterval.
-# Trails will always be reset if a player teleports to a different world/dimension
+# Teleporting to a different world/dimension always starts a fresh trail (worlds are drawn on separate maps).
 teleportDistance: 200
 
 # The text to display in the tooltip when clicking on a player's trail.

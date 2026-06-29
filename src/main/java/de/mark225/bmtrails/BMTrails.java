@@ -109,6 +109,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private static final DateTimeFormatter SESSION_LABEL_FORMAT = DateTimeFormatter.ofPattern("M/d/yy h:mma", Locale.ROOT)
             .withZone(ZoneId.systemDefault());
 
+    // Separator between a trail's base marker key and its per-segment index (a teleport splits one trail into
+    // several line segments). '#' never appears in a UUID, so it can't collide with the player/session UUID parts.
+    private static final String SEGMENT_KEY_SEPARATOR = "#";
+
     private ConcurrentMap<UUID, ConcurrentLinkedDeque<Vector3d>> currentTrails;
     private ConcurrentMap<UUID, Long> trailLastSeen;
     private ConcurrentMap<UUID, UUID> activeSessionIds;
@@ -489,8 +493,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
             }else {
                 Deque<Vector3d> deque = currentTrails.computeIfAbsent(uuid, key -> new ConcurrentLinkedDeque<>());
 
-                if(!deque.isEmpty() && deque.peekFirst().distance(vector3d) > teleportDetectionThreshold)
-                    deque.clear();
+                // Teleports (jumps larger than teleportDetectionThreshold) are no longer deleted here - all
+                // movement is kept as part of the same session and persisted. The visual line is instead split
+                // at these jumps when the markers are rendered (see splitIntoSegments / putTrailSegments), so a
+                // teleport breaks the drawn line without discarding the player's earlier path or starting a new session.
 
                 if(!deque.isEmpty() && sameCoordinates(deque.peekFirst(), vector3d)){
                     session.world = world;
@@ -527,28 +533,97 @@ public final class BMTrails extends JavaPlugin implements Listener {
         if(currentTrails.isEmpty()) return;
         if(separateSessionTrails){
             for(TrailSession session : trailSessions.values()){
-                MarkerSet rootMarkerSet = markerSets.get(session.world);
-                if(rootMarkerSet == null || session.points.size() <= 1) continue;
-                MarkerSet sessionMarkerSet = markerSetForSession(rootMarkerSet, session);
-                String label = sessionMarkerSet == rootMarkerSet ? sessionLabel(session) : sessionTimestampLabel(session);
-                sessionMarkerSet.put(markerKey(session), createMarker(session.player, session.points, label));
+                MarkerSet root = markerSets.get(session.world);
+                if(root == null || session.points.size() <= 1) continue;
+                renderTrailOverlay(root, session.player, session.id, session.points);
             }
             return;
         }
         for(Map.Entry<UUID, ConcurrentLinkedDeque<Vector3d>> entry : currentTrails.entrySet()){
             UUID world = playerWorlds.get(entry.getKey());
             if(world == null) continue;
-            MarkerSet markerSet = markerSets.get(world);
-            if(markerSet == null) continue;
-            if(entry.getValue().size() > 1) {
-                markerSet.put(entry.getKey().toString(), createMarker(entry.getKey(), entry.getValue(), null));
-            }else{
-                markerSet.remove(entry.getKey().toString());
-            }
+            MarkerSet root = markerSets.get(world);
+            if(root == null) continue;
+            if(entry.getValue().size() <= 1) continue;
+            renderTrailOverlay(root, entry.getKey(), null, entry.getValue());
         }
     }
 
-    private LineMarker createMarker(UUID player, Deque<Vector3d> points, String labelOverride){
+    /**
+     * Renders a single player's (or session's) trail, nested as Player Trails -> player -> (session) just like the
+     * heatmap overlays. A teleport splits the path into several discontinuous line segments (see
+     * {@link #splitIntoSegments}); rather than listing each segment as its own toggle, all segments of one trail are
+     * grouped into the leaf marker set and the individual segment markers are made unlisted / non-toggleable, so the
+     * whole trail toggles as a single entry and the gaps are purely visual. When the running BlueMap build does not
+     * support nested marker sets, the segments fall back into the world root set (keys stay player/session-qualified).
+     */
+    private void renderTrailOverlay(MarkerSet root, UUID player, UUID sessionId, Collection<Vector3d> points){
+        MarkerSet playerSet = trailPlayerSet(root, player);
+        MarkerSet leaf;
+        if(playerSet == null){
+            leaf = root; // nested marker sets unsupported: flatten into the world root set
+        }else if(sessionId != null){
+            leaf = trailSessionSet(playerSet, sessionId); // falls back to the player set if it can't nest a third level
+        }else{
+            leaf = playerSet;
+        }
+        // Keys stay fully qualified (player[:session]#index) regardless of which set they land in, so the recursive
+        // cleanObsoleteMarkers / shouldRemoveMarker logic can still resolve the player & session from any segment key.
+        String baseKey = sessionId != null ? player + ":" + sessionId : player.toString();
+        putTrailSegments(leaf, baseKey, player, points, trailMarkerLabel(player, sessionId));
+    }
+
+    private String trailMarkerLabel(UUID player, UUID sessionId){
+        if(sessionId == null) return null; // null -> createMarker falls back to the displayName preset
+        TrailSession session = trailSessions.get(sessionId);
+        return session != null ? sessionLabel(session) : resolvePlayerName(player);
+    }
+
+    /**
+     * Splits a player's path into contiguous segments, breaking it wherever two consecutive points are farther
+     * apart than {@link #teleportDetectionThreshold} (i.e. a teleport / large jump). All points are kept - this only
+     * decides where the drawn line should have a visual gap - so the underlying session and its history stay intact.
+     */
+    private List<List<Vector3d>> splitIntoSegments(Collection<Vector3d> points){
+        List<List<Vector3d>> segments = new ArrayList<>();
+        List<Vector3d> current = new ArrayList<>();
+        Vector3d previous = null;
+        for(Vector3d point : points){
+            if(previous != null && previous.distance(point) > teleportDetectionThreshold){
+                segments.add(current);
+                current = new ArrayList<>();
+            }
+            current.add(point);
+            previous = point;
+        }
+        if(!current.isEmpty()) segments.add(current);
+        return segments;
+    }
+
+    /**
+     * Renders one trail as a line marker per contiguous segment into {@code markerSet} (its leaf set). Each segment
+     * marker is keyed {@code baseKey + SEGMENT_KEY_SEPARATOR + index} and is unlisted / non-toggleable so the segments
+     * of a single trail behave as one grouped overlay rather than separate toggles. Any markers from a previous render
+     * of this same trail are removed first so a shrinking segment count never leaves stale lines behind.
+     */
+    private void putTrailSegments(MarkerSet markerSet, String baseKey, UUID player, Collection<Vector3d> points, String label){
+        removeTrailSegments(markerSet, baseKey);
+        List<List<Vector3d>> segments = splitIntoSegments(points);
+        int index = 0;
+        for(List<Vector3d> segment : segments){
+            if(segment.size() > 1)
+                markerSet.put(baseKey + SEGMENT_KEY_SEPARATOR + index, createMarker(player, segment, label));
+            index++;
+        }
+    }
+
+    /** Removes every line marker belonging to a trail (its per-segment keys, plus any legacy single-marker key). */
+    private void removeTrailSegments(MarkerSet markerSet, String baseKey){
+        String segmentPrefix = baseKey + SEGMENT_KEY_SEPARATOR;
+        markerSet.getMarkers().keySet().removeIf(key -> key.equals(baseKey) || key.startsWith(segmentPrefix));
+    }
+
+    private LineMarker createMarker(UUID player, Collection<Vector3d> points, String labelOverride){
         Color color = trailColor(player);
         String label = labelOverride != null ? labelOverride : displayNamePreset.replace("%player%", resolvePlayerName(player));
         Line line = new Line(points.toArray(Vector3d[]::new));
@@ -560,7 +635,11 @@ public final class BMTrails extends JavaPlugin implements Listener {
                 .lineColor(color)
                 .centerPosition()
                 .maxDistance(maxDistance);
-        builder = applyMarkerToggleOptions(builder, true, false);
+        // The segments of one trail are grouped under their (session/player) marker set, which provides the single
+        // toggle. The individual segment lines exist only to make the path discontinuous at teleports, so they are
+        // unlisted and not separately toggleable.
+        builder = applyMarkerToggleOptions(builder, false, false);
+        builder = applyMarkerUnlisted(builder);
         return builder.build();
     }
 
@@ -1016,11 +1095,8 @@ public final class BMTrails extends JavaPlugin implements Listener {
         return trailSessions.computeIfAbsent(sessionId, id -> new TrailSession(id, player, world, System.currentTimeMillis(), System.currentTimeMillis(), List.of()));
     }
 
-    private String markerKey(TrailSession session) {
-        return session.player + ":" + session.id;
-    }
-
     private UUID markerPlayerId(String key) {
+        key = stripSegmentSuffix(key);
         try{
             return UUID.fromString(key.contains(":") ? key.substring(0, key.indexOf(':')) : key);
         }catch(IllegalArgumentException e){
@@ -1029,12 +1105,19 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     private UUID markerSessionId(String key) {
+        key = stripSegmentSuffix(key);
         if(!key.contains(":")) return null;
         try{
             return UUID.fromString(key.substring(key.indexOf(':') + 1));
         }catch(IllegalArgumentException e){
             return null;
         }
+    }
+
+    /** Strips the trailing {@code SEGMENT_KEY_SEPARATOR + index} from a marker key so the UUID parts can be parsed. */
+    private String stripSegmentSuffix(String key) {
+        int separator = key.indexOf(SEGMENT_KEY_SEPARATOR);
+        return separator < 0 ? key : key.substring(0, separator);
     }
 
     private String sessionLabel(TrailSession session) {
@@ -1062,17 +1145,37 @@ public final class BMTrails extends JavaPlugin implements Listener {
         return player.toString();
     }
 
-    private MarkerSet markerSetForSession(MarkerSet rootMarkerSet, TrailSession session) {
-        Map<String, MarkerSet> childMarkerSets = childMarkerSets(rootMarkerSet);
-        if(childMarkerSets == null) return rootMarkerSet;
-        String label = resolvePlayerName(session.player);
-        MarkerSet sessionMarkerSet = childMarkerSets.computeIfAbsent("player_" + session.player, key ->
+    /**
+     * Player-level child set under the trail root ("Player Trails" -> player), mirroring {@link #heatmapPlayerSet}.
+     * Returns null when the running BlueMap build does not support nested marker sets.
+     */
+    private MarkerSet trailPlayerSet(MarkerSet root, UUID player){
+        Map<String, MarkerSet> children = childMarkerSets(root);
+        if(children == null) return null;
+        String label = resolvePlayerName(player);
+        MarkerSet set = children.computeIfAbsent("player_" + player, key ->
                 createMarkerSet(label, markerSetVisibleDefault, markerSetToggleable));
         // The set is only created once, but the name may not have been resolvable at creation time
         // (e.g. created from persisted history while the player was offline) - refresh it once we know better.
-        if(!label.equals(session.player.toString()) && !label.equals(sessionMarkerSet.getLabel()))
-            sessionMarkerSet.setLabel(label);
-        return sessionMarkerSet;
+        if(!label.equals(player.toString()) && !label.equals(set.getLabel()))
+            set.setLabel(label);
+        return set;
+    }
+
+    /**
+     * Session-level child set under a player set (player -> session), mirroring {@link #heatmapSessionSet}. Falls back
+     * to the player set if a third nesting level isn't supported.
+     */
+    private MarkerSet trailSessionSet(MarkerSet playerSet, UUID sessionId){
+        Map<String, MarkerSet> children = childMarkerSets(playerSet);
+        if(children == null) return playerSet;
+        TrailSession session = trailSessions.get(sessionId);
+        String label = session != null ? sessionTimestampLabel(session) : sessionId.toString();
+        MarkerSet set = children.computeIfAbsent("session_" + sessionId, key ->
+                createMarkerSet(label, markerSetVisibleDefault, markerSetToggleable));
+        if(session != null && !label.equals(set.getLabel()))
+            set.setLabel(label);
+        return set;
     }
 
     private MarkerSet createMarkerSet(String label, boolean visible, boolean toggleable) {

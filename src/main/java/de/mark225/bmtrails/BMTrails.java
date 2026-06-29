@@ -489,8 +489,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
             }else {
                 Deque<Vector3d> deque = currentTrails.computeIfAbsent(uuid, key -> new ConcurrentLinkedDeque<>());
 
-                if(!deque.isEmpty() && deque.peekFirst().distance(vector3d) > teleportDetectionThreshold)
+                if(!deque.isEmpty() && deque.peekFirst().distance(vector3d) > teleportDetectionThreshold){
                     deque.clear();
+                    session.points.clear();
+                }
 
                 if(!deque.isEmpty() && sameCoordinates(deque.peekFirst(), vector3d)){
                     session.world = world;

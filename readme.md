@@ -30,7 +30,7 @@ The following aspects of this plugin are configurable:
 For more details on how to use each of these config settings, take a look at the [default config template](./src/main/resources/config.yml).
 
 ## Other notable features
-- Automatic reset of trails on world changes and teleports (configurable minimum distance between sampling points to be considered a "teleportation")
+- Trails and heatmaps are tracked separately per dimension: the Overworld, the Nether and the End each keep their own trail/heatmap on their own BlueMap map, and moving between dimensions no longer erases the trail you left behind. Large jumps within a single world (teleports past a configurable distance) break the drawn line into separate segments instead of connecting across the gap.
 - Automatically hides trails of players that are also hidden in BlueMap's live player markers
 - Mostly handled asynchronously on separate threads (theoretically good for performance on large servers)
 - Automatically reloads with BlueMap's reload command for live config changes

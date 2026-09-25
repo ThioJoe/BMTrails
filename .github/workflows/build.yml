@@ -37,9 +37,17 @@ jobs:
       - name: Build plugin jar
         run: ./gradlew build --refresh-dependencies
 
+      # Name the jar bmtrails-custom-<N>.jar with N going up by one every run. It is derived from this
+      # workflow's run number, offset so the numbering continues after the last hand-named jar (custom-18).
+      - name: Number plugin jar
+        run: |
+          BUILD_NUMBER=$(( ${{ github.run_number }} - 32 ))
+          mv build/libs/bmtrails-*.jar "build/libs/bmtrails-custom-${BUILD_NUMBER}.jar"
+          echo "BUILD_NUMBER=${BUILD_NUMBER}" >> "$GITHUB_ENV"
+
       - name: Upload plugin jar
         uses: actions/upload-artifact@v4
         with:
-          name: BMTrails-plugin-jar
+          name: BMTrails-plugin-jar-custom-${{ env.BUILD_NUMBER }}
           path: build/libs/*.jar
           if-no-files-found: error

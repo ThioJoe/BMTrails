@@ -76,7 +76,9 @@ trailPointsMax: 60
 # The earlier movement is NOT discarded - it stays part of the same session/trail, the line just doesn't visually
 # connect across the teleport.
 # Make sure to tweak this, so it isn't possible to travel this distance within a single samplingInterval.
-# Teleporting to a different world/dimension always starts a fresh trail (worlds are drawn on separate maps).
+# Changing dimension (e.g. going through a Nether portal or to the End) starts a fresh trail/session for the new
+# dimension, while the trail you left behind in the previous dimension is kept and keeps showing on that
+# dimension's own BlueMap map. Each dimension is tracked completely independently.
 teleportDistance: 200
 
 # The text to display in the tooltip when clicking on a player's trail.

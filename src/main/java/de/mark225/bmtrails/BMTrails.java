@@ -113,14 +113,14 @@ public final class BMTrails extends JavaPlugin implements Listener {
     // several line segments). '#' never appears in a UUID, so it can't collide with the player/session UUID parts.
     private static final String SEGMENT_KEY_SEPARATOR = "#";
 
-    private ConcurrentMap<UUID, ConcurrentLinkedDeque<Vector3d>> currentTrails;
-    private ConcurrentMap<UUID, Long> trailLastSeen;
+    // Keyed per (player, world) so each dimension a player visits keeps its own independent, persistent trail.
+    private ConcurrentMap<TrailId, ConcurrentLinkedDeque<Vector3d>> currentTrails;
+    private ConcurrentMap<TrailId, Long> trailLastSeen;
     private ConcurrentMap<UUID, UUID> activeSessionIds;
     private ConcurrentMap<UUID, TrailSession> trailSessions;
     private ConcurrentMap<UUID, Color> colorCache;
     private ConcurrentMap<UUID, MarkerSet> markerSets;
     private ConcurrentMap<UUID, MarkerSet> heatmapMarkerSets;
-    private ConcurrentMap<UUID, UUID> playerWorlds;
     private ConcurrentMap<UUID, String> nameCache;
 
     private Map<String, Color> colorPermissions;
@@ -170,11 +170,18 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private File historyFile;
 
 
+    /**
+     * Identifies a single per-dimension trail: one player's movement within one specific world. Trails (and the
+     * sessions that back them) are tracked per (player, world) so that moving between dimensions never disturbs the
+     * trail left behind in the previous world - each dimension keeps its own trail and renders on its own map.
+     */
+    private static record TrailId(UUID player, UUID world) {}
+
     private static final class TrailSession {
         private final UUID id;
         private final UUID player;
-        private UUID world;
-        private long startedAt;
+        private final UUID world;
+        private final long startedAt;
         private long lastSeen;
         private final ConcurrentLinkedDeque<Vector3d> points;
 
@@ -213,7 +220,6 @@ public final class BMTrails extends JavaPlugin implements Listener {
             trailLastSeen = new ConcurrentHashMap<>();
             activeSessionIds = new ConcurrentHashMap<>();
             trailSessions = new ConcurrentHashMap<>();
-            playerWorlds = new ConcurrentHashMap<>();
             historyFile = new File(getDataFolder(), "trail-history.yml");
             loadTrailHistory();
             Bukkit.getPluginManager().registerEvents(this, this);
@@ -407,7 +413,12 @@ public final class BMTrails extends JavaPlugin implements Listener {
         String name = ConfigValue.MARKER_SET_NAME.getValue();
         String heatmapName = ConfigValue.HEATMAP_SET_NAME.getValue();
         for(World world : Bukkit.getWorlds()){
-            BlueMapWorld bmw = blueMapAPI.getWorld(world.getUID()).orElse(null);
+            // Resolve the BlueMap world for every Bukkit world - including the nether and the end, which are
+            // separate Bukkit worlds. Try the world's UUID first (BlueMap's usual key) and fall back to handing it
+            // the Bukkit World object directly, so a dimension is still picked up if the UUID lookup comes up empty.
+            BlueMapWorld bmw = blueMapAPI.getWorld(world.getUID())
+                    .or(() -> blueMapAPI.getWorld(world))
+                    .orElse(null);
             if(bmw == null) continue;
             List<BlueMapMap> maps = bmw.getMaps().stream()
                     .filter(map -> !excludedMaps.contains(map.getId()))
@@ -476,44 +487,46 @@ public final class BMTrails extends JavaPlugin implements Listener {
 
     private void asyncCollectionTask(Map<UUID, Location> currentLocations){
         pruneExpiredHistory();
-        if(!persistTrails) currentTrails.keySet().removeIf(key -> !currentLocations.containsKey(key));
+        // Without persistence we only keep each online player's trail for the dimension they are currently in;
+        // trails for dimensions they have left (or players who have logged off) are dropped rather than retained.
+        if(!persistTrails){
+            currentTrails.keySet().removeIf(id -> {
+                Location loc = currentLocations.get(id.player());
+                return loc == null || !loc.getWorld().getUID().equals(id.world());
+            });
+            trailSessions.values().removeIf(session -> {
+                Location loc = currentLocations.get(session.player);
+                return loc == null || !loc.getWorld().getUID().equals(session.world);
+            });
+        }
+        long now = System.currentTimeMillis();
         for(Map.Entry<UUID, Location> entry : currentLocations.entrySet()){
             UUID uuid = entry.getKey();
             Location loc = entry.getValue();
             Vector3d vector3d = Vector3d.from(loc.getX(), loc.getY(), loc.getZ());
             UUID world = loc.getWorld().getUID();
-            trailLastSeen.put(uuid, System.currentTimeMillis());
+            TrailId trailId = new TrailId(uuid, world);
+            trailLastSeen.put(trailId, now);
+
+            // Trails and sessions are tracked per dimension. Moving to another world leaves the previous world's
+            // trail/session untouched (it stays persisted and keeps rendering on that world's map); a fresh session
+            // is started for the new world instead. Teleports within a world are kept as part of the same session
+            // and only split into separate line segments at render time (see splitIntoSegments / putTrailSegments).
             TrailSession session = ensureActiveSession(uuid, world);
-            UUID previousWorld = playerWorlds.put(uuid, world);
-            if(previousWorld != null && !previousWorld.equals(world)){
-                currentTrails.put(uuid, new ConcurrentLinkedDeque<>(List.of(vector3d)));
-                session.points.clear();
-                session.points.addFirst(vector3d);
-                session.world = world;
-                session.lastSeen = System.currentTimeMillis();
-            }else {
-                Deque<Vector3d> deque = currentTrails.computeIfAbsent(uuid, key -> new ConcurrentLinkedDeque<>());
+            Deque<Vector3d> deque = currentTrails.computeIfAbsent(trailId, key -> new ConcurrentLinkedDeque<>());
 
-                // Teleports (jumps larger than teleportDetectionThreshold) are no longer deleted here - all
-                // movement is kept as part of the same session and persisted. The visual line is instead split
-                // at these jumps when the markers are rendered (see splitIntoSegments / putTrailSegments), so a
-                // teleport breaks the drawn line without discarding the player's earlier path or starting a new session.
-
-                if(!deque.isEmpty() && sameCoordinates(deque.peekFirst(), vector3d)){
-                    session.world = world;
-                    session.lastSeen = System.currentTimeMillis();
-                    continue;
-                }
-
-                deque.addFirst(vector3d);
-                session.points.addFirst(vector3d);
-                session.world = world;
-                session.lastSeen = System.currentTimeMillis();
-                while (deque.size() > maxTrailLength && deque.size() > 0)
-                    deque.removeLast();
-                while (session.points.size() > maxTrailLength && session.points.size() > 0)
-                    session.points.removeLast();
+            if(!deque.isEmpty() && sameCoordinates(deque.peekFirst(), vector3d)){
+                session.lastSeen = now;
+                continue;
             }
+
+            deque.addFirst(vector3d);
+            session.points.addFirst(vector3d);
+            session.lastSeen = now;
+            while (deque.size() > maxTrailLength && deque.size() > 0)
+                deque.removeLast();
+            while (session.points.size() > maxTrailLength && session.points.size() > 0)
+                session.points.removeLast();
         }
         if(System.currentTimeMillis() - lastUpdate >= 10000)
             Bukkit.getScheduler().runTaskAsynchronously(this, this::asyncTrailTask);
@@ -531,7 +544,6 @@ public final class BMTrails extends JavaPlugin implements Listener {
 
     private void buildTrails(){
         cleanObsoleteMarkers();
-        if(currentTrails.isEmpty()) return;
         if(separateSessionTrails){
             for(TrailSession session : trailSessions.values()){
                 MarkerSet root = markerSets.get(session.world);
@@ -540,13 +552,11 @@ public final class BMTrails extends JavaPlugin implements Listener {
             }
             return;
         }
-        for(Map.Entry<UUID, ConcurrentLinkedDeque<Vector3d>> entry : currentTrails.entrySet()){
-            UUID world = playerWorlds.get(entry.getKey());
-            if(world == null) continue;
-            MarkerSet root = markerSets.get(world);
+        for(Map.Entry<TrailId, ConcurrentLinkedDeque<Vector3d>> entry : currentTrails.entrySet()){
+            MarkerSet root = markerSets.get(entry.getKey().world());
             if(root == null) continue;
             if(entry.getValue().size() <= 1) continue;
-            renderTrailOverlay(root, entry.getKey(), null, entry.getValue());
+            renderTrailOverlay(root, entry.getKey().player(), null, entry.getValue());
         }
     }
 
@@ -697,8 +707,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
             TrailSession session = trailSessions.get(markerSessionId(key));
             return session == null || !world.equals(session.world);
         }
-        if(!currentTrails.containsKey(uuid)) return true;
-        return !world.equals(playerWorlds.get(uuid));
+        return !currentTrails.containsKey(new TrailId(uuid, world));
     }
 
     private boolean isTrackedWorld(UUID world){
@@ -710,7 +719,6 @@ public final class BMTrails extends JavaPlugin implements Listener {
 
     private void buildHeatmaps(){
         cleanObsoleteHeatmaps();
-        if(currentTrails.isEmpty()) return;
         if(separateSessionTrails){
             for(TrailSession session : trailSessions.values()){
                 MarkerSet root = heatmapMarkerSets.get(session.world);
@@ -719,13 +727,11 @@ public final class BMTrails extends JavaPlugin implements Listener {
             }
             return;
         }
-        for(Map.Entry<UUID, ConcurrentLinkedDeque<Vector3d>> entry : currentTrails.entrySet()){
-            UUID world = playerWorlds.get(entry.getKey());
-            if(world == null) continue;
-            MarkerSet root = heatmapMarkerSets.get(world);
+        for(Map.Entry<TrailId, ConcurrentLinkedDeque<Vector3d>> entry : currentTrails.entrySet()){
+            MarkerSet root = heatmapMarkerSets.get(entry.getKey().world());
             if(root == null) continue;
             if(entry.getValue().size() <= 1) continue;
-            renderHeatmapOverlay(root, entry.getKey(), null, entry.getValue());
+            renderHeatmapOverlay(root, entry.getKey().player(), null, entry.getValue());
         }
     }
 
@@ -1065,7 +1071,7 @@ public final class BMTrails extends JavaPlugin implements Listener {
                 }
                 return playerSet.getMarkers().isEmpty();
             }
-            return !currentTrails.containsKey(player) || !world.equals(playerWorlds.get(player));
+            return !currentTrails.containsKey(new TrailId(player, world));
         });
     }
 
@@ -1085,13 +1091,27 @@ public final class BMTrails extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
-        trailLastSeen.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
+        trailLastSeen.put(new TrailId(event.getPlayer().getUniqueId(), event.getPlayer().getWorld().getUID()),
+                System.currentTimeMillis());
         saveTrailHistory();
     }
 
+    /**
+     * Returns the player's active session for the world they are currently in, creating a new one when needed. A
+     * session is bound to a single world for its whole life: as soon as the player moves to a different dimension we
+     * start a fresh session for that dimension instead of reusing (and overwriting) the previous one, so each
+     * dimension's path is preserved and rendered on its own map rather than being clobbered on every world change.
+     */
     private TrailSession ensureActiveSession(UUID player, UUID world) {
-        UUID sessionId = activeSessionIds.computeIfAbsent(player, ignored -> UUID.randomUUID());
-        return trailSessions.computeIfAbsent(sessionId, id -> new TrailSession(id, player, world, System.currentTimeMillis(), System.currentTimeMillis(), List.of()));
+        UUID activeId = activeSessionIds.get(player);
+        TrailSession active = activeId == null ? null : trailSessions.get(activeId);
+        if(active != null && world.equals(active.world)) return active;
+        long now = System.currentTimeMillis();
+        UUID sessionId = UUID.randomUUID();
+        TrailSession session = new TrailSession(sessionId, player, world, now, now, List.of());
+        trailSessions.put(sessionId, session);
+        activeSessionIds.put(player, sessionId);
+        return session;
     }
 
     private UUID markerPlayerId(String key) {
@@ -1284,7 +1304,8 @@ public final class BMTrails extends JavaPlugin implements Listener {
     private void pruneExpiredHistory() {
         if(historyRetentionDays <= 0) return;
         long cutoff = System.currentTimeMillis() - historyRetentionDays * 86_400_000L;
-        currentTrails.keySet().removeIf(uuid -> trailLastSeen.getOrDefault(uuid, System.currentTimeMillis()) < cutoff);
+        currentTrails.keySet().removeIf(id -> trailLastSeen.getOrDefault(id, System.currentTimeMillis()) < cutoff);
+        trailLastSeen.keySet().removeIf(id -> !currentTrails.containsKey(id));
         trailSessions.values().removeIf(session -> session.lastSeen < cutoff);
     }
 
@@ -1294,10 +1315,24 @@ public final class BMTrails extends JavaPlugin implements Listener {
         for(String key : config.getConfigurationSection("players") == null ? Set.<String>of() : config.getConfigurationSection("players").getKeys(false)){
             try{
                 UUID uuid = UUID.fromString(key);
-                UUID world = UUID.fromString(config.getString("players." + key + ".world"));
-                trailLastSeen.put(uuid, config.getLong("players." + key + ".lastSeen"));
-                playerWorlds.put(uuid, world);
-                currentTrails.put(uuid, readPoints(config.getStringList("players." + key + ".points")));
+                // Current-window trails are stored per world (players.<uuid>.worlds.<worldUuid>). Files written by
+                // older plugin versions used a single-world layout (players.<uuid>.world/points) instead; read both
+                // so existing history keeps displaying after an update.
+                var worlds = config.getConfigurationSection("players." + key + ".worlds");
+                if(worlds != null){
+                    for(String worldKey : worlds.getKeys(false)){
+                        UUID world = UUID.fromString(worldKey);
+                        TrailId id = new TrailId(uuid, world);
+                        String base = "players." + key + ".worlds." + worldKey;
+                        trailLastSeen.put(id, config.getLong(base + ".lastSeen"));
+                        currentTrails.put(id, readPoints(config.getStringList(base + ".points")));
+                    }
+                }else if(config.getString("players." + key + ".world") != null){
+                    // Legacy format: the old plugin reset trails on world change, so all points belong to that world.
+                    TrailId id = new TrailId(uuid, UUID.fromString(config.getString("players." + key + ".world")));
+                    trailLastSeen.put(id, config.getLong("players." + key + ".lastSeen"));
+                    currentTrails.put(id, readPoints(config.getStringList("players." + key + ".points")));
+                }
             }catch(Exception e){
                 getLogger().log(Level.WARNING, "Ignoring invalid persisted trail for " + key, e);
             }
@@ -1316,6 +1351,22 @@ public final class BMTrails extends JavaPlugin implements Listener {
                 getLogger().log(Level.WARNING, "Ignoring invalid persisted session " + key, e);
             }
         }
+        // Rebuild any missing rolling-window trail from that player's newest persisted session in the same world.
+        // The sessions carry the same point data, so this recovers the (non-session-mode) trail display for history
+        // files whose players section is missing entries or was written by a different plugin version.
+        Map<TrailId, TrailSession> newestSessions = new HashMap<>();
+        for(TrailSession session : trailSessions.values()){
+            TrailId id = new TrailId(session.player, session.world);
+            TrailSession newest = newestSessions.get(id);
+            if(newest == null || session.lastSeen > newest.lastSeen) newestSessions.put(id, session);
+        }
+        newestSessions.forEach((id, session) -> {
+            if(session.points.isEmpty() || currentTrails.containsKey(id)) return;
+            ConcurrentLinkedDeque<Vector3d> points = new ConcurrentLinkedDeque<>(session.points);
+            while(points.size() > maxTrailLength) points.removeLast();
+            currentTrails.put(id, points);
+            trailLastSeen.putIfAbsent(id, session.lastSeen);
+        });
     }
 
     private ConcurrentLinkedDeque<Vector3d> readPoints(List<String> points) {
@@ -1344,10 +1395,10 @@ public final class BMTrails extends JavaPlugin implements Listener {
         if(!persistTrails || historyFile == null || currentTrails == null || trailSessions == null) return;
         pruneExpiredHistory();
         YamlConfiguration config = new YamlConfiguration();
-        currentTrails.forEach((uuid, points) -> {
-            config.set("players." + uuid + ".world", playerWorlds.get(uuid) == null ? null : playerWorlds.get(uuid).toString());
-            config.set("players." + uuid + ".lastSeen", trailLastSeen.getOrDefault(uuid, System.currentTimeMillis()));
-            config.set("players." + uuid + ".points", writePoints(points));
+        currentTrails.forEach((id, points) -> {
+            String base = "players." + id.player() + ".worlds." + id.world();
+            config.set(base + ".lastSeen", trailLastSeen.getOrDefault(id, System.currentTimeMillis()));
+            config.set(base + ".points", writePoints(points));
         });
         trailSessions.forEach((id, session) -> {
             config.set("sessions." + id + ".player", session.player.toString());

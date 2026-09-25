@@ -1218,7 +1218,13 @@ public final class BMTrails extends JavaPlugin implements Listener {
     }
 
     private <T> T invokeBuilderBoolean(T builder, String methodName, boolean value) throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
-        Method method = builder.getClass().getMethod(methodName, boolean.class);
+        Method method;
+        try{
+            method = builder.getClass().getMethod(methodName, boolean.class);
+        }catch(NoSuchMethodException e){
+            // some builder options take the boxed type instead, e.g. Marker.Builder#listed(Boolean)
+            method = builder.getClass().getMethod(methodName, Boolean.class);
+        }
         return (T) method.invoke(builder, value);
     }
 
